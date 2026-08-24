@@ -77,8 +77,8 @@ void KeepLayerAlive()
     PFN_vkCreateInstance create = (PFN_vkCreateInstance)dlsym(module, "vkCreateInstance");
     VkApplicationInfo app = {
         VK_STRUCTURE_TYPE_APPLICATION_INFO, NULL,
-        "RenderDoc forced instance",        VK_MAKE_VERSION(1, 0, 0),
-        "RenderDoc forced instance",        VK_MAKE_VERSION(1, 0, 0),
+        "RenderTest forced instance",      VK_MAKE_VERSION(1, 0, 0),
+        "RenderTest forced instance",      VK_MAKE_VERSION(1, 0, 0),
         VK_MAKE_VERSION(1, 0, 0),
     };
     VkInstanceCreateInfo info = {
@@ -99,15 +99,68 @@ void KeepLayerAlive()
 }
 #endif
 
+#if ENABLED(RDOC_WIN32)
+// for GetFileVersionInfo* in the loader diagnostics below
+#pragma comment(lib, "version.lib")
+#endif
+
 // we don't actually hook any modules here. This is just used so that it's called
 // at the right time in initialisation (after capture options are available) to
 // set environment variables
 class VulkanHook : LibraryHook
 {
   VulkanHook() {}
+
+#if ENABLED(RDOC_WIN32)
+  // called the first time a vulkan-1.dll (including any private copy, e.g. one
+  // bundled by an emulator) is loaded into the process
+  static void VulkanLibraryLoaded(void *module, const char *filename)
+  {
+    char path[MAX_PATH] = {0};
+    HMODULE lib = (HMODULE)module;
+
+    if(lib)
+      GetModuleFileNameA(lib, path, MAX_PATH - 1);
+
+    RDCLOG("vulkan loader loaded into the process: %s (requested as '%s')",
+           path[0] ? path : "<unknown>", filename);
+
+    // dump the module version so we can tell a system loader from a private one
+    VS_FIXEDFILEINFO *info = NULL;
+    DWORD handle = 0;
+    DWORD size = GetFileVersionInfoSizeA(path, &handle);
+
+    if(size > 0)
+    {
+      void *data = malloc(size);
+
+      if(data && GetFileVersionInfoA(path, handle, size, data))
+      {
+        UINT len = 0;
+        if(VerQueryValueA(data, "\\", (LPVOID *)&info, &len) && info)
+        {
+          RDCLOG("vulkan loader version: %u.%u.%u.%u (dev build: %s)",
+                 HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS),
+                 HIWORD(info->dwFileVersionLS), LOWORD(info->dwFileVersionLS),
+                 (info->dwFileFlags & VS_FF_PRIVATEBUILD) ? "yes" : "no");
+        }
+      }
+
+      free(data);
+    }
+  }
+#endif
+
   void RegisterHooks()
   {
     RDCLOG("Registering Vulkan hooks");
+
+#if ENABLED(RDOC_WIN32)
+    // observe when a vulkan loader (system or private copy) is loaded - this
+    // does not hook anything, it just logs so we can diagnose cases where an
+    // application uses a bundled loader that may not honour implicit layers
+    LibraryHooks::RegisterLibraryHook("vulkan-1.dll", &VulkanLibraryLoaded);
+#endif
 
     // we don't register any library or function hooks because we use the layer system
 
@@ -177,6 +230,18 @@ class VulkanHook : LibraryHook
 
     // check options to set further variables, and apply
     OptionsUpdated();
+
+    // diagnostics: report whether the enable variable actually got set in this
+    // process, and whether vulkan-1.dll is already present (static import)
+#if ENABLED(RDOC_WIN32)
+    {
+      HMODULE vulkanLib = GetModuleHandleA("vulkan-1.dll");
+      RDCLOG("Vulkan diagnostics: enable var '%s' is set to '%s', vulkan-1.dll is %s",
+             RENDERDOC_VULKAN_LAYER_VAR,
+             Process::GetEnvVariable(RENDERDOC_VULKAN_LAYER_VAR).c_str(),
+             vulkanLib != NULL ? "already loaded (static import)" : "not loaded yet");
+    }
+#endif
   }
 
   void RemoveHooks()
@@ -348,7 +413,7 @@ VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL VK_LAYER_RENDERDOC_CaptureEnumera
         RENDERDOC_VULKAN_LAYER_NAME,
         VK_API_VERSION_1_0,
         VK_MAKE_VERSION(RENDERDOC_VERSION_MAJOR, RENDERDOC_VERSION_MINOR, 0),
-        "Debugging capture layer for RenderDoc",
+        "Debugging capture layer for RenderTest",
     };
 
     // set the one layer property
@@ -379,6 +444,14 @@ VK_LAYER_RENDERDOC_CaptureEnumerateInstanceExtensionProperties(
     const VkEnumerateInstanceExtensionPropertiesChain *pChain, const char *pLayerName,
     uint32_t *pPropertyCount, VkExtensionProperties *pProperties)
 {
+  // log the first time the loader calls into us via this pre-instance entry point
+  static bool firstCall = true;
+  if(firstCall)
+  {
+    firstCall = false;
+    RDCLOG("Vulkan layer activated - loader called vkEnumerateInstanceExtensionProperties");
+  }
+
   if(pLayerName && !strcmp(pLayerName, RENDERDOC_VULKAN_LAYER_NAME))
     return WrappedVulkan::GetProvidedInstanceExtensionProperties(pPropertyCount, pProperties);
 
@@ -468,6 +541,15 @@ VK_LAYER_RENDERDOC_CaptureGetInstanceProcAddr(VkInstance instance, const char *p
   // if name is NULL undefined is returned, let's return NULL
   if(pName == NULL)
     return NULL;
+
+  // log the first time the loader calls into us - covers loaders that use this
+  // entry point instead of the negotiate interface
+  static bool firstCall = true;
+  if(firstCall)
+  {
+    firstCall = false;
+    RDCLOG("Vulkan layer activated - loader called vkGetInstanceProcAddr('%s')", pName);
+  }
 
   // a NULL instance can return vkGetInstanceProcAddr or a global function, handle that here
 
@@ -645,6 +727,11 @@ VK_LAYER_RENDERDOC_Capture_layerGetPhysicalDeviceProcAddr(VkInstance instance, c
 VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
 VK_LAYER_RENDERDOC_CaptureNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *pVersionStruct)
 {
+  // this is the first entry point the loader calls after loading the layer
+  // library - log it so we can tell from the log file whether the implicit
+  // layer was actually picked up by the Vulkan loader at all
+  RDCLOG("Vulkan layer activated - the loader is negotiating the layer interface version");
+
   if(pVersionStruct->sType != LAYER_NEGOTIATE_INTERFACE_STRUCT)
     return VK_ERROR_INITIALIZATION_FAILED;
 

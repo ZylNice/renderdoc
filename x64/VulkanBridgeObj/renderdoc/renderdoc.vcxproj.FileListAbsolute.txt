@@ -1,0 +1,1 @@
+C:\Project\Renderdoc\renderdoc\x64\VulkanBridgeBuild\d3dcompiler_47.dll

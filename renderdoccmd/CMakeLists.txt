@@ -86,8 +86,8 @@ else()
 
     add_executable(renderdoccmd ${sources})
     
-    if(INTERNAL_SELF_CAPTURE)
-        set_target_properties(renderdoccmd PROPERTIES OUTPUT_NAME "rdocselfcmd")
+    if(NOT RDOC_BASE_NAME STREQUAL "renderdoc")
+        set_target_properties(renderdoccmd PROPERTIES OUTPUT_NAME "${RDOC_BASE_NAME}cmd")
     endif()
 endif()
 

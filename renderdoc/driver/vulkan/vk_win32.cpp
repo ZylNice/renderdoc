@@ -197,7 +197,16 @@ rdcstr GetJSONPath(bool wow6432)
   }
 
   if(wow6432)
-    jsonPath += "\\x86";
+  {
+    // In a distributed layout the 32-bit DLL/JSON live in an x86\ folder next
+    // to this one. In a development layout the 64-bit build lives in
+    // x64\<config>\ and the 32-bit build in Win32\<config>\, so map across.
+    int32_t idx = jsonPath.find("\\x64\\");
+    if(idx >= 0)
+      jsonPath = jsonPath.substr(0, size_t(idx)) + "\\Win32" + jsonPath.substr(size_t(idx + 4));
+    else
+      jsonPath += "\\x86";
+  }
 
   jsonPath += "\\";
 

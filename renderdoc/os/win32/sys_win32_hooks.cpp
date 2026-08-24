@@ -86,6 +86,17 @@ public:
     // register libraries that we care about. We don't need a callback when they are loaded
     LibraryHooks::RegisterLibraryHook("kernel32.dll", NULL);
     LibraryHooks::RegisterLibraryHook("advapi32.dll", NULL);
+
+    // diagnostics: observe how the (possibly private) Vulkan loader discovers
+    // implicit layers through the registry, so we can tell which manifests it
+    // enumerates and which it decides to load. The loader may use either the
+    // wide or ANSI registry APIs, so hook both plus RegGetValue.
+    RegEnumValueWHook.Register("advapi32.dll", "RegEnumValueW", RegEnumValueW_hook);
+    RegQueryValueExWHook.Register("advapi32.dll", "RegQueryValueExW", RegQueryValueExW_hook);
+    RegEnumValueAHook.Register("advapi32.dll", "RegEnumValueA", RegEnumValueA_hook);
+    RegQueryValueExAHook.Register("advapi32.dll", "RegQueryValueExA", RegQueryValueExA_hook);
+    RegGetValueWHook.Register("advapi32.dll", "RegGetValueW", RegGetValueW_hook);
+    RegGetValueAHook.Register("advapi32.dll", "RegGetValueA", RegGetValueA_hook);
     LibraryHooks::RegisterLibraryHook("api-ms-win-core-processthreads-l1-1-0.dll", NULL);
     LibraryHooks::RegisterLibraryHook("api-ms-win-core-processthreads-l1-1-1.dll", NULL);
     LibraryHooks::RegisterLibraryHook("api-ms-win-core-processthreads-l1-1-2.dll", NULL);
@@ -149,6 +160,102 @@ private:
     return true;
   }
   void EndRecurse() { Threading::SetTLSValue(m_RecurseSlot, NULL); }
+
+  // diagnostics for the Vulkan layer discovery - log when a manifest path is
+  // enumerated (RegEnumValueW) or explicitly queried (RegQueryValueExW)
+  static LSTATUS WINAPI RegEnumValueW_hook(HKEY key, DWORD index, LPWSTR valueName,
+                                           LPDWORD valueNameSize, LPDWORD reserved,
+                                           LPDWORD type, LPBYTE data, LPDWORD cbData)
+  {
+    LSTATUS ret = syshooks.RegEnumValueWHook()(key, index, valueName, valueNameSize, reserved,
+                                               type, data, cbData);
+
+    if(ret == ERROR_SUCCESS && valueName != NULL)
+    {
+      size_t n = wcslen(valueName);
+      if(n > 5 && wcscmp(valueName + n - 5, L".json") == 0)
+        RDCLOG("[regdiag] RegEnumValueW[%u] enumerated manifest '%ls'", index, valueName);
+    }
+
+    return ret;
+  }
+
+  static LSTATUS WINAPI RegQueryValueExW_hook(HKEY key, LPCWSTR valueName, LPDWORD reserved,
+                                              LPDWORD type, LPBYTE data, LPDWORD cbData)
+  {
+    LSTATUS ret = syshooks.RegQueryValueExWHook()(key, valueName, reserved, type, data, cbData);
+
+    if(valueName != NULL &&
+       (wcsstr(valueName, L"rendertest.json") != NULL ||
+        wcsstr(valueName, L"renderdoc.json") != NULL))
+      RDCLOG("[regdiag] RegQueryValueExW('%ls') -> %d", valueName, ret);
+
+    return ret;
+  }
+
+  static LSTATUS WINAPI RegEnumValueA_hook(HKEY key, DWORD index, LPSTR valueName,
+                                           LPDWORD valueNameSize, LPDWORD reserved,
+                                           LPDWORD type, LPBYTE data, LPDWORD cbData)
+  {
+    LSTATUS ret = syshooks.RegEnumValueAHook()(key, index, valueName, valueNameSize, reserved,
+                                               type, data, cbData);
+
+    if(ret == ERROR_SUCCESS && valueName != NULL)
+    {
+      size_t n = strlen(valueName);
+      if(n > 5 && strcmp(valueName + n - 5, ".json") == 0)
+        RDCLOG("[regdiag] RegEnumValueA[%u] enumerated manifest '%s'", index, valueName);
+    }
+
+    return ret;
+  }
+
+  static LSTATUS WINAPI RegQueryValueExA_hook(HKEY key, LPCSTR valueName, LPDWORD reserved,
+                                              LPDWORD type, LPBYTE data, LPDWORD cbData)
+  {
+    LSTATUS ret = syshooks.RegQueryValueExAHook()(key, valueName, reserved, type, data, cbData);
+
+    if(valueName != NULL &&
+       (strstr(valueName, "rendertest.json") != NULL ||
+        strstr(valueName, "renderdoc.json") != NULL))
+      RDCLOG("[regdiag] RegQueryValueExA('%s') -> %d", valueName, ret);
+
+    return ret;
+  }
+
+  static LSTATUS WINAPI RegGetValueW_hook(HKEY hkey, LPCWSTR subKey, LPCWSTR value, DWORD flags,
+                                          LPDWORD type, PVOID data, LPDWORD cbData)
+  {
+    LSTATUS ret =
+        syshooks.RegGetValueWHook()(hkey, subKey, value, flags, type, data, cbData);
+
+    if(value != NULL && (wcsstr(value, L"rendertest.json") != NULL ||
+                         wcsstr(value, L"renderdoc.json") != NULL))
+      RDCLOG("[regdiag] RegGetValueW(key '%ls', value '%ls') -> %d",
+             subKey ? subKey : L"", value, ret);
+
+    return ret;
+  }
+
+  static LSTATUS WINAPI RegGetValueA_hook(HKEY hkey, LPCSTR subKey, LPCSTR value, DWORD flags,
+                                          LPDWORD type, PVOID data, LPDWORD cbData)
+  {
+    LSTATUS ret = syshooks.RegGetValueAHook()(hkey, subKey, value, flags, type, data, cbData);
+
+    if(value != NULL && (strstr(value, "rendertest.json") != NULL ||
+                         strstr(value, "renderdoc.json") != NULL))
+      RDCLOG("[regdiag] RegGetValueA(key '%s', value '%s') -> %d", subKey ? subKey : "", value,
+             ret);
+
+    return ret;
+  }
+
+  HookedFunction<decltype(&RegEnumValueW)> RegEnumValueWHook;
+  HookedFunction<decltype(&RegQueryValueExW)> RegQueryValueExWHook;
+  HookedFunction<decltype(&RegEnumValueA)> RegEnumValueAHook;
+  HookedFunction<decltype(&RegQueryValueExA)> RegQueryValueExAHook;
+  HookedFunction<decltype(&RegGetValueW)> RegGetValueWHook;
+  HookedFunction<decltype(&RegGetValueA)> RegGetValueAHook;
   HookedFunction<PFN_CREATE_PROCESS_A> CreateProcessA;
   HookedFunction<PFN_CREATE_PROCESS_W> CreateProcessW;
 
@@ -207,8 +314,17 @@ private:
   {
     bool recursive = syshooks.CheckRecurse();
 
+    RDCLOG("Process diagnostics: %s entered, recursive=%u, inject=%u, flags=0x%08x, "
+           "environment=%p, processInfo=%p",
+           entryPoint, recursive ? 1U : 0U, inject ? 1U : 0U, dwCreationFlags, pEnvironment,
+           lpProcessInformation);
+
     if(recursive)
+    {
+      RDCLOG("Process diagnostics: %s bypassing child injection because the hook is recursive",
+             entryPoint);
       return realFunc(dwCreationFlags, pEnvironment, lpProcessInformation);
+    }
 
     PROCESS_INFORMATION dummy;
     RDCEraseEl(dummy);
@@ -290,26 +406,46 @@ private:
       env = (void *)envA.data();
     }
 
-    RDCDEBUG("Calling real %s", entryPoint);
+    RDCLOG("Process diagnostics: calling real %s with forced flags=0x%08x, resume=%u, inject=%u",
+           entryPoint, dwCreationFlags, resume ? 1U : 0U, inject ? 1U : 0U);
     BOOL ret = realFunc(dwCreationFlags, env, lpProcessInformation);
-    RDCDEBUG("Called real %s", entryPoint);
+    RDCLOG("Process diagnostics: real %s returned %u, error=%lu, pid=%lu, process=%p, thread=%p",
+           entryPoint, ret ? 1U : 0U, GetLastError(),
+           ret ? lpProcessInformation->dwProcessId : 0UL,
+           ret ? lpProcessInformation->hProcess : NULL, ret ? lpProcessInformation->hThread : NULL);
 
     if(ret && inject)
     {
-      RDCDEBUG("Intercepting %s", entryPoint);
+      RDCLOG("Process diagnostics: injecting child pid %lu created through %s",
+             lpProcessInformation->dwProcessId, entryPoint);
 
       // inherit logfile and capture options
       rdcpair<RDResult, uint32_t> res = Process::InjectIntoProcess(
           lpProcessInformation->dwProcessId, {}, RenderDoc::Inst().GetCaptureFileTemplate(),
           RenderDoc::Inst().GetCaptureOptions(), false);
 
+      RDCLOG("Process diagnostics: child injection pid %lu returned code %u, message '%s', ident %u",
+             lpProcessInformation->dwProcessId, (uint32_t)res.first.code, res.first.message.c_str(),
+             res.second);
+
       if(res.first == ResultCode::Succeeded)
+      {
         RenderDoc::Inst().AddChildProcess((uint32_t)lpProcessInformation->dwProcessId, res.second);
+        RDCLOG("Process diagnostics: child pid %lu registered with target control ident %u",
+               lpProcessInformation->dwProcessId, res.second);
+      }
+    }
+    else
+    {
+      RDCLOG("Process diagnostics: not injecting child from %s because ret=%u inject=%u", entryPoint,
+             ret ? 1U : 0U, inject ? 1U : 0U);
     }
 
     if(resume)
     {
-      ResumeThread(lpProcessInformation->hThread);
+      DWORD resumeResult = ResumeThread(lpProcessInformation->hThread);
+      RDCLOG("Process diagnostics: resumed child pid %lu, ResumeThread returned %lu",
+             lpProcessInformation->dwProcessId, resumeResult);
     }
 
     // ensure we clean up after ourselves
@@ -322,6 +458,34 @@ private:
     syshooks.EndRecurse();
 
     return ret;
+  }
+
+  // utility / system processes that will never render anything. Skipping them
+  // saves target control ports for real renderer processes in deep process
+  // trees (e.g. emulators), and avoids poking crash handler processes.
+  static bool IsUtilityProcess(const rdcstr &lowerApp)
+  {
+    static const rdcarray<rdcstr> blocked = {
+        "sc.exe",
+        "wmic.exe",
+        "cmd.exe",
+        "conhost.exe",
+        "reg.exe",
+        "regsvr32.exe",
+        "msiexec.exe",
+        "powershell.exe",
+        "aria2.exe",
+        "curl.exe",
+        "crashpad_handler.exe",
+    };
+
+    for(const rdcstr &b : blocked)
+    {
+      if(lowerApp.contains(b))
+        return true;
+    }
+
+    return false;
   }
 
   static bool ShouldInject(LPCWSTR lpApplicationName, LPCWSTR lpCommandLine)
@@ -337,16 +501,24 @@ private:
     {
       rdcstr app = strlower(StringFormat::Wide2UTF8(lpApplicationName));
 
-      if(app.contains("renderdoccmd.exe") || app.contains("qrenderdoc.exe"))
+      if(app.contains("rendertestcmd.exe") || app.contains("qrendertest.exe"))
+      {
+        inject = false;
+      }
+      else if(IsUtilityProcess(app))
       {
         inject = false;
       }
     }
-    if(lpCommandLine)
+    if(lpCommandLine && inject)
     {
       rdcstr cmd = strlower(StringFormat::Wide2UTF8(lpCommandLine));
 
-      if(cmd.contains("renderdoccmd.exe") || cmd.contains("qrenderdoc.exe"))
+      if(cmd.contains("rendertestcmd.exe") || cmd.contains("qrendertest.exe"))
+      {
+        inject = false;
+      }
+      else if(IsUtilityProcess(cmd))
       {
         inject = false;
       }

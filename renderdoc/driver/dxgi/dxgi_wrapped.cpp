@@ -1232,6 +1232,8 @@ HRESULT WrappedIDXGIFactory::CreateSwapChain(IUnknown *pDevice, DXGI_SWAP_CHAIN_
                                              IDXGISwapChain **ppSwapChain)
 {
   ID3DDevice *wrapDevice = GetD3DDevice(pDevice);
+  RDCLOG("DXGI diagnostics: CreateSwapChain called, device %p, wrapped device %p, window %p", pDevice,
+         wrapDevice, pDesc ? pDesc->OutputWindow : NULL);
 
   if(wrapDevice)
   {
@@ -1271,6 +1273,8 @@ HRESULT WrappedIDXGIFactory::CreateSwapChainForHwnd(
     IDXGISwapChain1 **ppSwapChain)
 {
   ID3DDevice *wrapDevice = GetD3DDevice(pDevice);
+  RDCLOG("DXGI diagnostics: CreateSwapChainForHwnd called, device %p, wrapped device %p, window %p",
+         pDevice, wrapDevice, hWnd);
 
   WrappedIDXGIOutput6 *wrappedOutput = (WrappedIDXGIOutput6 *)pRestrictToOutput;
   IDXGIOutput *unwrappedOutput = wrappedOutput ? wrappedOutput->GetReal() : NULL;

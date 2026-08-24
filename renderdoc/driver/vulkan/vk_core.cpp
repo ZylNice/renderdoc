@@ -3582,11 +3582,11 @@ void WrappedVulkan::Present(DeviceOwnedWindow devWnd)
   }
 
   if(IsActiveCapturing(m_State) && !m_AppControlledCapture)
-    RenderDoc::Inst().EndFrameCapture(devWnd);
+    RenderDoc::Inst().EndVulkanBridgeFrameCapture(this, devWnd);
 
   if(RenderDoc::Inst().ShouldTriggerCapture(m_FrameCounter) && IsBackgroundCapturing(m_State))
   {
-    RenderDoc::Inst().StartFrameCapture(devWnd);
+    RenderDoc::Inst().StartVulkanBridgeFrameCapture(this, devWnd);
 
     m_AppControlledCapture = false;
     m_CapturedFrames.back().frameNumber = m_FrameCounter;

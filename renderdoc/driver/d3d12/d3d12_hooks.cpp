@@ -442,6 +442,10 @@ public:
                                                  D3D_FEATURE_LEVEL FeatureLevel, REFIID riid,
                                                  _COM_Outptr_opt_ void **ppvDevice)
   {
+    RDCLOG("D3D12 diagnostics: DeviceFactory::CreateDevice entered, factory %p, adapter %p, "
+           "feature level %x, interface %s, output %p",
+           this, adapter, FeatureLevel, ToStr(riid).c_str(), ppvDevice);
+
     if(RenderDoc::Inst().GetCaptureOptions().apiValidation)
     {
       D3D12DevConfiguration tmpConfig = {};
@@ -557,11 +561,17 @@ public:
     WrappedIDXGISwapChain4::RegisterD3DDeviceCallback(GetD3D12DeviceIfAlloc);
 
     // also require d3dcompiler_??.dll
-    if(GetD3DCompiler() == NULL)
+    HMODULE d3dCompiler = GetD3DCompiler();
+    RDCLOG("D3D12 diagnostics: GetD3DCompiler returned %p", d3dCompiler);
+    if(d3dCompiler == NULL)
     {
       RDCERR("Failed to load d3dcompiler_??.dll - not inserting D3D12 hooks.");
       return;
     }
+
+    HMODULE d3d12Module = GetModuleHandleA("d3d12.dll");
+    RDCLOG("D3D12 diagnostics: registering hooks, d3d12.dll currently %sloaded at %p",
+           d3d12Module ? "" : "not ", d3d12Module);
 
     LibraryHooks::RegisterLibraryHook("d3d12.dll", NULL);
 
@@ -570,6 +580,18 @@ public:
     GetInterface.Register("d3d12.dll", "D3D12GetInterface", D3D12GetInterface_hook);
     EnableExperimentalFeatures.Register("d3d12.dll", "D3D12EnableExperimentalFeatures",
                                         D3D12EnableExperimentalFeatures_hook);
+    RDCLOG("D3D12 diagnostics: hook functions registered successfully");
+
+    // The D3D12 Agility SDK lets applications ship and directly load a local D3D12Core.dll,
+    // whose exports bypass the system d3d12.dll loader entirely. Register the same hooks on
+    // that module so device creation is still intercepted in that case.
+    LibraryHooks::RegisterLibraryHook("d3d12core.dll", NULL);
+
+    CreateDeviceCore.Register("d3d12core.dll", "D3D12CreateDevice", D3D12CreateDevice_Core_hook);
+    GetDebugInterfaceCore.Register("d3d12core.dll", "D3D12GetDebugInterface",
+                                   D3D12GetDebugInterface_Core_hook);
+    GetInterfaceCore.Register("d3d12core.dll", "D3D12GetInterface", D3D12GetInterface_Core_hook);
+    RDCLOG("D3D12 diagnostics: D3D12Core.dll (Agility SDK) hooks registered");
     GetD3D11On12On7.Register("d3d11on12.dll", "GetD3D11On12On7Interface",
                              GetD3D11On12On7Interface_hook);
 
@@ -689,6 +711,11 @@ private:
   HookedFunction<PFN_D3D12_CREATE_DEVICE> CreateDevice;
   HookedFunction<PFN_D3D12_ENABLE_EXPERIMENTAL_FEATURES> EnableExperimentalFeatures;
   HookedFunction<PFNGetD3D11On12On7Interface> GetD3D11On12On7;
+
+  // trampolines for the Agility SDK's local D3D12Core.dll exports
+  HookedFunction<PFN_D3D12_GET_DEBUG_INTERFACE> GetDebugInterfaceCore;
+  HookedFunction<PFN_D3D12_GET_INTERFACE> GetInterfaceCore;
+  HookedFunction<PFN_D3D12_CREATE_DEVICE> CreateDeviceCore;
 
   // re-entrancy detection (can happen in rare cases with e.g. fraps)
   uint64_t m_RecurseSlot = 0;
@@ -896,7 +923,12 @@ private:
                                                D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid,
                                                void **ppDevice)
   {
+    RDCLOG("D3D12 diagnostics: D3D12CreateDevice hook entered, adapter %p, feature level %x, "
+           "requested interface %s, output %p",
+           pAdapter, MinimumFeatureLevel, ToStr(riid).c_str(), ppDevice);
+
     PFN_D3D12_CREATE_DEVICE createFunc = d3d12hooks.CreateDevice();
+    RDCLOG("D3D12 diagnostics: registered real D3D12CreateDevice is %p", createFunc);
 
     if(!createFunc)
     {
@@ -978,6 +1010,9 @@ private:
 
   static HRESULT WINAPI D3D12GetInterface_hook(REFCLSID rclsid, REFIID riid, void **ppvDebug)
   {
+    RDCLOG("D3D12 diagnostics: D3D12GetInterface hook entered, clsid %s, interface %s, output %p",
+           ToStr(rclsid).c_str(), ToStr(riid).c_str(), ppvDebug);
+
     if(riid == CLSID_D3D12StateObjectFactory)
     {
       RDCLOG("Deliberately reporting no support for state object factories");
@@ -986,8 +1021,141 @@ private:
 
     IUnknown *realUnk = NULL;
     HRESULT real = d3d12hooks.GetInterface()(rclsid, riid, (void **)&realUnk);
+    RDCLOG("D3D12 diagnostics: real D3D12GetInterface returned %s, interface %p",
+           ToStr(real).c_str(), realUnk);
 
     HRESULT hr = GetWrappedInterface(realUnk, riid, ppvDebug);
+    RDCLOG("D3D12 diagnostics: wrapping D3D12GetInterface result returned %s, wrapped interface %p",
+           ToStr(hr).c_str(), ppvDebug ? *ppvDebug : NULL);
+
+    if(realUnk)
+      realUnk->Release();
+
+    if(SUCCEEDED(hr))
+      return hr;
+
+    RDCWARN("Unknown UUID passed to D3D12GetInterface: %s (clsid %s). Real call %s succeed (%x).",
+            ToStr(riid).c_str(), ToStr(rclsid).c_str(), SUCCEEDED(real) ? "did" : "did not", real);
+
+    return E_NOINTERFACE;
+  }
+
+  static HRESULT WINAPI D3D12CreateDevice_Core_hook(IUnknown *pAdapter,
+                                                    D3D_FEATURE_LEVEL MinimumFeatureLevel,
+                                                    REFIID riid, void **ppDevice)
+  {
+    RDCLOG("D3D12 diagnostics: D3D12CreateDevice hook entered via D3D12Core.dll, adapter %p, "
+           "feature level %x, requested interface %s, output %p",
+           pAdapter, MinimumFeatureLevel, ToStr(riid).c_str(), ppDevice);
+
+    PFN_D3D12_CREATE_DEVICE createFunc = d3d12hooks.CreateDeviceCore();
+
+    if(!createFunc)
+    {
+      HMODULE core = GetModuleHandleA("d3d12core.dll");
+
+      if(core)
+        createFunc = (PFN_D3D12_CREATE_DEVICE)GetProcAddress(core, "D3D12CreateDevice");
+    }
+
+    if(!createFunc)
+      createFunc = d3d12hooks.CreateDevice();
+
+    if(!createFunc)
+    {
+      RDCERR("Something went seriously wrong, no real D3D12CreateDevice could be resolved!");
+      return E_UNEXPECTED;
+    }
+
+    return d3d12hooks.Create_Internal(createFunc, NULL, pAdapter, MinimumFeatureLevel, riid,
+                                      ppDevice);
+  }
+
+  static HRESULT WINAPI D3D12GetDebugInterface_Core_hook(REFIID riid, void **ppvDebug)
+  {
+    RDCLOG("D3D12 diagnostics: D3D12GetDebugInterface hook entered via D3D12Core.dll, "
+           "interface %s",
+           ToStr(riid).c_str());
+
+    if(riid == CLSID_D3D12StateObjectFactory)
+    {
+      RDCLOG("Deliberately reporting no support for state object factories");
+      return E_NOINTERFACE;
+    }
+
+    PFN_D3D12_GET_DEBUG_INTERFACE realFunc = d3d12hooks.GetDebugInterfaceCore();
+
+    if(!realFunc)
+    {
+      HMODULE core = GetModuleHandleA("d3d12core.dll");
+
+      if(core)
+        realFunc = (PFN_D3D12_GET_DEBUG_INTERFACE)GetProcAddress(core, "D3D12GetDebugInterface");
+    }
+
+    if(!realFunc)
+      realFunc = d3d12hooks.GetDebugInterface();
+
+    if(!realFunc)
+      return E_NOINTERFACE;
+
+    IUnknown *realUnk = NULL;
+    HRESULT real = realFunc(riid, (void **)&realUnk);
+
+    HRESULT hr = GetWrappedInterface(realUnk, riid, ppvDebug);
+
+    if(realUnk)
+      realUnk->Release();
+
+    if(SUCCEEDED(hr))
+      return hr;
+
+    RDCWARN("Unknown UUID passed to D3D12GetDebugInterface: %s. Real call %s succeed (%x).",
+            ToStr(riid).c_str(), SUCCEEDED(real) ? "did" : "did not", real);
+
+    return E_NOINTERFACE;
+  }
+
+  static HRESULT WINAPI D3D12GetInterface_Core_hook(REFCLSID rclsid, REFIID riid, void **ppvDebug)
+  {
+    RDCLOG("D3D12 diagnostics: D3D12GetInterface hook entered via D3D12Core.dll, clsid %s, "
+           "interface %s, output %p",
+           ToStr(rclsid).c_str(), ToStr(riid).c_str(), ppvDebug);
+
+    if(riid == CLSID_D3D12StateObjectFactory)
+    {
+      RDCLOG("Deliberately reporting no support for state object factories");
+      return E_NOINTERFACE;
+    }
+
+    PFN_D3D12_GET_INTERFACE realFunc = d3d12hooks.GetInterfaceCore();
+
+    if(!realFunc)
+    {
+      HMODULE core = GetModuleHandleA("d3d12core.dll");
+
+      if(core)
+        realFunc = (PFN_D3D12_GET_INTERFACE)GetProcAddress(core, "D3D12GetInterface");
+    }
+
+    if(!realFunc)
+      realFunc = d3d12hooks.GetInterface();
+
+    if(!realFunc)
+      return E_NOINTERFACE;
+
+    IUnknown *realUnk = NULL;
+    HRESULT real = realFunc(rclsid, riid, (void **)&realUnk);
+
+    RDCLOG("D3D12 diagnostics: real D3D12GetInterface (D3D12Core.dll) returned %s, interface %p",
+           ToStr(real).c_str(), realUnk);
+
+    HRESULT hr = GetWrappedInterface(realUnk, riid, ppvDebug);
+
+    RDCLOG(
+        "D3D12 diagnostics: wrapping D3D12GetInterface (D3D12Core.dll) result returned %s, "
+        "wrapped interface %p",
+        ToStr(hr).c_str(), ppvDebug ? *ppvDebug : NULL);
 
     if(realUnk)
       realUnk->Release();

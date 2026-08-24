@@ -256,6 +256,10 @@ public:
     CreateDXGIFactory2.Register("dxgi.dll", "CreateDXGIFactory2", CreateDXGIFactory2_hook);
     GetDebugInterface.Register("dxgi.dll", "DXGIGetDebugInterface", DXGIGetDebugInterface_hook);
     GetDebugInterface1.Register("dxgi.dll", "DXGIGetDebugInterface1", DXGIGetDebugInterface1_hook);
+
+    HMODULE dxgiModule = GetModuleHandleA("dxgi.dll");
+    RDCLOG("DXGI diagnostics: hook functions registered, dxgi.dll currently %sloaded at %p",
+           dxgiModule ? "" : "not ", dxgiModule);
   }
 
 private:
@@ -272,6 +276,7 @@ private:
 
   static HRESULT WINAPI CreateDXGIFactory_hook(__in REFIID riid, __out void **ppFactory)
   {
+    RDCLOG("DXGI diagnostics: CreateDXGIFactory hook entered, interface %s", ToStr(riid).c_str());
     if(ppFactory)
       *ppFactory = NULL;
     HRESULT ret = dxgihooks.CreateDXGIFactory()(riid, ppFactory);
@@ -279,11 +284,14 @@ private:
     if(SUCCEEDED(ret))
       RefCountDXGIObject::HandleWrap("CreateDXGIFactory", riid, ppFactory);
 
+    RDCLOG("DXGI diagnostics: CreateDXGIFactory returned %s, factory %p", ToStr(ret).c_str(),
+           ppFactory ? *ppFactory : NULL);
     return ret;
   }
 
   static HRESULT WINAPI CreateDXGIFactory1_hook(__in REFIID riid, __out void **ppFactory)
   {
+    RDCLOG("DXGI diagnostics: CreateDXGIFactory1 hook entered, interface %s", ToStr(riid).c_str());
     if(ppFactory)
       *ppFactory = NULL;
     HRESULT ret = dxgihooks.CreateDXGIFactory1()(riid, ppFactory);
@@ -291,11 +299,15 @@ private:
     if(SUCCEEDED(ret))
       RefCountDXGIObject::HandleWrap("CreateDXGIFactory1", riid, ppFactory);
 
+    RDCLOG("DXGI diagnostics: CreateDXGIFactory1 returned %s, factory %p", ToStr(ret).c_str(),
+           ppFactory ? *ppFactory : NULL);
     return ret;
   }
 
   static HRESULT WINAPI CreateDXGIFactory2_hook(UINT Flags, REFIID riid, void **ppFactory)
   {
+    RDCLOG("DXGI diagnostics: CreateDXGIFactory2 hook entered, flags %u, interface %s", Flags,
+           ToStr(riid).c_str());
     if(ppFactory)
       *ppFactory = NULL;
     HRESULT ret = dxgihooks.CreateDXGIFactory2()(Flags, riid, ppFactory);
@@ -303,6 +315,8 @@ private:
     if(SUCCEEDED(ret))
       RefCountDXGIObject::HandleWrap("CreateDXGIFactory2", riid, ppFactory);
 
+    RDCLOG("DXGI diagnostics: CreateDXGIFactory2 returned %s, factory %p", ToStr(ret).c_str(),
+           ppFactory ? *ppFactory : NULL);
     return ret;
   }
 

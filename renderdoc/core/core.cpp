@@ -2327,7 +2327,136 @@ void RenderDoc::RemoveDeviceFrameCapturer(void *dev)
   RDCLOG("Removing device frame capturer for %#p", dev);
 
   SCOPED_LOCK(m_CapturerListLock);
+
+  auto it = m_DeviceFrameCapturers.find(dev);
+  if(it != m_DeviceFrameCapturers.end())
+  {
+    IFrameCapturer *cap = it->second;
+    m_VulkanBridgeCapturesActive.removeOne(cap);
+    if(m_VulkanBridgeCaptureOwner == cap)
+      m_VulkanBridgeCaptureOwner = NULL;
+  }
+
   m_DeviceFrameCapturers.erase(dev);
+}
+
+void RenderDoc::StartVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwnedWindow devWnd)
+{
+  rdcarray<IFrameCapturer *> capturers;
+
+  {
+    SCOPED_LOCK(m_CapturerListLock);
+
+    if(m_VulkanBridgeCaptureOwner != NULL)
+    {
+      RDCLOG("Vulkan bridge diagnostics: ignoring start from %p because owner %p is active", trigger,
+             m_VulkanBridgeCaptureOwner);
+      return;
+    }
+
+    for(const auto &it : m_DeviceFrameCapturers)
+    {
+      IFrameCapturer *cap = it.second;
+      if(cap && cap->GetFrameCaptureDriver() == RDCDriver::Vulkan && !capturers.contains(cap))
+        capturers.push_back(cap);
+    }
+
+    if(trigger && trigger->GetFrameCaptureDriver() == RDCDriver::Vulkan && !capturers.contains(trigger))
+      capturers.push_back(trigger);
+
+    m_VulkanBridgeCaptureOwner = trigger;
+    m_VulkanBridgeCapturesActive = capturers;
+  }
+
+  RDCLOG("Vulkan bridge diagnostics: starting %zu capturers from owner %p", capturers.size(),
+         trigger);
+
+  m_CaptureTitle.clear();
+
+  for(IFrameCapturer *cap : capturers)
+  {
+    DeviceOwnedWindow captureWindow(NULL, NULL);
+    if(cap == trigger)
+      captureWindow = devWnd;
+
+    RDCLOG("Vulkan bridge diagnostics: starting capturer %p, device %p, window %p", cap,
+           captureWindow.device, captureWindow.windowHandle);
+    cap->StartFrameCapture(captureWindow);
+    m_CapturesActive++;
+  }
+}
+
+bool RenderDoc::EndVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwnedWindow devWnd)
+{
+  rdcarray<IFrameCapturer *> capturers;
+
+  {
+    SCOPED_LOCK(m_CapturerListLock);
+
+    if(m_VulkanBridgeCaptureOwner != trigger)
+    {
+      RDCLOG("Vulkan bridge diagnostics: ignoring end from %p because owner is %p", trigger,
+             m_VulkanBridgeCaptureOwner);
+      return true;
+    }
+
+    capturers = m_VulkanBridgeCapturesActive;
+    m_VulkanBridgeCapturesActive.clear();
+    m_VulkanBridgeCaptureOwner = NULL;
+  }
+
+  bool ret = true;
+  RDCLOG("Vulkan bridge diagnostics: ending %zu capturers from owner %p", capturers.size(), trigger);
+
+  for(IFrameCapturer *cap : capturers)
+  {
+    DeviceOwnedWindow captureWindow(NULL, NULL);
+    if(cap == trigger)
+      captureWindow = devWnd;
+
+    RDCLOG("Vulkan bridge diagnostics: ending capturer %p, device %p, window %p", cap,
+           captureWindow.device, captureWindow.windowHandle);
+    ret &= cap->EndFrameCapture(captureWindow);
+    m_CapturesActive--;
+  }
+
+  return ret;
+}
+
+bool RenderDoc::DiscardVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwnedWindow devWnd)
+{
+  rdcarray<IFrameCapturer *> capturers;
+
+  {
+    SCOPED_LOCK(m_CapturerListLock);
+
+    if(m_VulkanBridgeCaptureOwner != trigger)
+    {
+      RDCLOG("Vulkan bridge diagnostics: ignoring discard from %p because owner is %p", trigger,
+             m_VulkanBridgeCaptureOwner);
+      return true;
+    }
+
+    capturers = m_VulkanBridgeCapturesActive;
+    m_VulkanBridgeCapturesActive.clear();
+    m_VulkanBridgeCaptureOwner = NULL;
+  }
+
+  bool ret = true;
+  RDCLOG("Vulkan bridge diagnostics: discarding %zu capturers from owner %p", capturers.size(),
+         trigger);
+
+  for(IFrameCapturer *cap : capturers)
+  {
+    DeviceOwnedWindow captureWindow(NULL, NULL);
+    if(cap == trigger)
+      captureWindow = devWnd;
+
+    ret &= cap->DiscardFrameCapture(captureWindow);
+    m_CapturesActive--;
+  }
+
+  return ret;
 }
 
 void RenderDoc::AddFrameCapturer(DeviceOwnedWindow devWnd, IFrameCapturer *cap)

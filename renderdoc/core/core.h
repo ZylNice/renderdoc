@@ -594,6 +594,10 @@ public:
   void AddDeviceFrameCapturer(void *dev, IFrameCapturer *cap);
   void RemoveDeviceFrameCapturer(void *dev);
 
+  void StartVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwnedWindow devWnd);
+  bool EndVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwnedWindow devWnd);
+  bool DiscardVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwnedWindow devWnd);
+
   IFrameCapturer *MatchFrameCapturer(DeviceOwnedWindow devWnd);
 
   void StartFrameCapture(DeviceOwnedWindow devWnd);
@@ -754,6 +758,8 @@ private:
   std::map<DeviceOwnedWindow, FrameCap> m_WindowFrameCapturers;
   DeviceOwnedWindow m_ActiveWindow;
   std::map<void *, IFrameCapturer *> m_DeviceFrameCapturers;
+  IFrameCapturer *m_VulkanBridgeCaptureOwner = NULL;
+  rdcarray<IFrameCapturer *> m_VulkanBridgeCapturesActive;
 
   bool m_VendorExts[arraydim<VendorExtensions>()] = {};
 

@@ -658,8 +658,8 @@ if(APPLE)
     set_target_properties(renderdoc PROPERTIES BUILD_WITH_INSTALL_NAME_DIR TRUE)
 endif()
 
-if(INTERNAL_SELF_CAPTURE)
-    set_target_properties(renderdoc PROPERTIES OUTPUT_NAME "rdocself")
+if(NOT RDOC_BASE_NAME STREQUAL "renderdoc")
+    set_target_properties(renderdoc PROPERTIES OUTPUT_NAME "${RDOC_BASE_NAME}")
 endif()
 
 if(ANDROID)

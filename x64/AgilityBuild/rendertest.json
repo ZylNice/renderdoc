@@ -1,11 +1,11 @@
 {
   "file_format_version" : "1.1.2",
   "layer" : {
-    "name": "@VULKAN_LAYER_NAME@",
+    "name": "VK_LAYER_RENDERDOC_Capture",
     "type": "GLOBAL",
-    "library_path": "@VULKAN_LAYER_MODULE_PATH@",
+    "library_path": ".\\rendertest.dll",
     "api_version": "1.4.324",
-    "implementation_version": "@RENDERDOC_VERSION_MINOR@",
+    "implementation_version": "46",
     "description": "Debugging capture layer for RenderTest",
     "functions": {
       "vkGetInstanceProcAddr": "VK_LAYER_RENDERDOC_CaptureGetInstanceProcAddr",
@@ -39,10 +39,10 @@
       }
     ],
     "enable_environment": {
-      "@VULKAN_ENABLE_VAR@": "1"
+      "ENABLE_VULKAN_RENDERDOC_CAPTURE": "1"
     },
     "disable_environment": {
-      "DISABLE_VULKAN_RENDERDOC_CAPTURE_@RENDERDOC_VERSION_MAJOR@_@RENDERDOC_VERSION_MINOR@": "1"
+      "DISABLE_VULKAN_RENDERDOC_CAPTURE_1_46": "1"
     }
   }
 }

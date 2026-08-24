@@ -249,6 +249,608 @@ extern "C" __declspec(dllexport) void __cdecl INTERNAL_ApplyEnvMods(void *ignore
   Process::ApplyEnvironmentModification();
 }
 
+// ------------------------------------------------------------------------
+// Thread-context based injection.
+//
+// CreateRemoteThread is a well-known injection vector which is commonly
+// monitored or blocked by anti-cheat and crash-reporting systems. For a
+// freshly launched (CREATE_SUSPENDED) process we can instead hijack the main
+// thread: point its context at a small stub which calls a function, parks in
+// a spin loop until we suspend it again, and finally restore the original
+// context so the process starts up as normal.
+// ------------------------------------------------------------------------
+
+struct HijackState
+{
+  CONTEXT origCtx;
+  bool saved = false;
+};
+
+static bool WriteStubCall(HANDLE hProcess, uintptr_t funcAddr, uintptr_t argAddr,
+                          bool x86CalleePops, void **stubMemOut, DWORD **flagOut)
+{
+#if ENABLED(RDOC_X64)
+  // x64 stub (single calling convention, caller provides shadow space):
+  //   and rsp, -0x10            48 83 E4 F0
+  //   sub rsp, 0x20             48 83 EC 20
+  //   mov rcx, <arg>            48 B9 imm64
+  //   mov rax, <func>           48 B8 imm64
+  //   call rax                  FF D0
+  //   mov rdx, <flag>           48 BA imm64
+  //   mov dword ptr [rdx], 1    C7 02 01 00 00 00
+  //   jmp $                     EB FE
+  const size_t stubSize = 64;
+  byte stub[64] = {0};
+  size_t o = 0;
+
+  stub[o++] = 0x48;
+  stub[o++] = 0x83;
+  stub[o++] = 0xE4;
+  stub[o++] = 0xF0;
+
+  stub[o++] = 0x48;
+  stub[o++] = 0x83;
+  stub[o++] = 0xEC;
+  stub[o++] = 0x20;
+
+  stub[o++] = 0x48;
+  stub[o++] = 0xB9;
+  memcpy(stub + o, &argAddr, sizeof(argAddr));
+  o += sizeof(argAddr);
+
+  stub[o++] = 0x48;
+  stub[o++] = 0xB8;
+  memcpy(stub + o, &funcAddr, sizeof(funcAddr));
+  o += sizeof(funcAddr);
+
+  stub[o++] = 0xFF;
+  stub[o++] = 0xD0;
+
+  // mov rdx, imm64   48 BA <imm64>
+  stub[o++] = 0x48;
+  stub[o++] = 0xBA;
+  // the imm64 is patched later - record where it lives in the stub
+  const size_t flagOperandOffset = o;
+  o += sizeof(uintptr_t);
+
+  // mov dword ptr [rdx], 1   C7 02 01 00 00 00
+  stub[o++] = 0xC7;
+  stub[o++] = 0x02;
+  stub[o++] = 0x01;
+  stub[o++] = 0x00;
+  stub[o++] = 0x00;
+  stub[o++] = 0x00;
+
+  stub[o++] = 0xEB;
+  stub[o++] = 0xFE;
+#else
+  // x86 stub:
+  //   push <arg>                68 imm32
+  //   mov eax, <func>           B8 imm32
+  //   call eax                  FF D0
+  //   add esp, 4                83 C4 04   (cdecl only, omitted for stdcall)
+  //   mov dword ptr [<flag>], 1 C7 05 imm32 01 00 00 00
+  //   jmp $                     EB FE
+  const size_t stubSize = 48;
+  byte stub[48] = {0};
+  size_t o = 0;
+
+  stub[o++] = 0x68;
+  memcpy(stub + o, &argAddr, sizeof(argAddr));
+  o += sizeof(argAddr);
+
+  stub[o++] = 0xB8;
+  memcpy(stub + o, &funcAddr, sizeof(funcAddr));
+  o += sizeof(funcAddr);
+
+  stub[o++] = 0xFF;
+  stub[o++] = 0xD0;
+
+  if(!x86CalleePops)
+  {
+    stub[o++] = 0x83;
+    stub[o++] = 0xC4;
+    stub[o++] = 0x04;
+  }
+
+  // mov dword ptr [imm32],], 1   C7 05 <imm32> 01 00 00 00
+  stub[o++] = 0xC7;
+  stub[o++] = 0x05;
+  // the imm32 is patched later - record where it lives in the stub
+  const size_t flagOperandOffset = o;
+  o += sizeof(uint32_t);
+
+  stub[o++] = 0x01;
+  stub[o++] = 0x00;
+  stub[o++] = 0x00;
+  stub[o++] = 0x00;
+
+  stub[o++] = 0xEB;
+  stub[o++] = 0xFE;
+#endif
+
+  void *stubMem = VirtualAllocEx(hProcess, NULL, stubSize, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+  if(stubMem == NULL)
+    return false;
+
+  // the completion flag lives in the last 4 bytes of the stub allocation
+  uintptr_t flagAddr = (uintptr_t)stubMem + stubSize - sizeof(DWORD);
+  memcpy(stub + flagOperandOffset, &flagAddr, sizeof(flagAddr));
+
+  SIZE_T numWritten = 0;
+
+  if(!WriteProcessMemory(hProcess, stubMem, stub, stubSize, &numWritten) || numWritten != stubSize)
+  {
+    VirtualFreeEx(hProcess, stubMem, 0, MEM_RELEASE);
+    return false;
+  }
+
+  *stubMemOut = stubMem;
+  *flagOut = (DWORD *)flagAddr;
+  return true;
+}
+
+// Runs func(arg) on a hijacked thread. The thread must currently be suspended.
+// It is resumed to execute the stub, then re-suspended once the completion flag
+// is set (or a timeout occurs). On the first call the original context is
+// saved into hj so it can later be restored with RestoreHijackedThread.
+static bool HijackedExec(HANDLE hProcess, HANDLE hThread, HijackState &hj, uintptr_t funcAddr,
+                         uintptr_t argAddr, bool x86CalleePops, uint32_t timeoutMS)
+{
+  void *stubMem = NULL;
+  DWORD *flagRemote = NULL;
+
+  if(!WriteStubCall(hProcess, funcAddr, argAddr, x86CalleePops, &stubMem, &flagRemote))
+  {
+    RDCERR("Couldn't write remote stub for hijacked call");
+    return false;
+  }
+
+  CONTEXT ctx;
+  RDCEraseEl(ctx);
+  ctx.ContextFlags = CONTEXT_FULL;
+
+  if(!GetThreadContext(hThread, &ctx))
+  {
+    RDCERR("GetThreadContext failed: %u", GetLastError());
+    VirtualFreeEx(hProcess, stubMem, 0, MEM_RELEASE);
+    return false;
+  }
+
+  if(!hj.saved)
+  {
+    hj.origCtx = ctx;
+    hj.saved = true;
+  }
+
+#if ENABLED(RDOC_X64)
+  ctx.Rip = (DWORD64)(uintptr_t)stubMem;
+#else
+  ctx.Eip = (DWORD)(uintptr_t)stubMem;
+#endif
+
+  if(!SetThreadContext(hThread, &ctx))
+  {
+    RDCERR("SetThreadContext failed: %u", GetLastError());
+    VirtualFreeEx(hProcess, stubMem, 0, MEM_RELEASE);
+    return false;
+  }
+
+  if(ResumeThread(hThread) == (DWORD)-1)
+  {
+    RDCERR("ResumeThread failed: %u", GetLastError());
+    VirtualFreeEx(hProcess, stubMem, 0, MEM_RELEASE);
+    return false;
+  }
+
+  bool done = false;
+  uint32_t elapsed = 0;
+
+  while(elapsed < timeoutMS)
+  {
+    Sleep(10);
+    elapsed += 10;
+
+    // bail out early if the process died while we were waiting
+    if(WaitForSingleObject(hProcess, 0) == WAIT_OBJECT_0)
+    {
+      RDCERR("Process exited while waiting for hijacked call");
+      return false;
+    }
+
+    DWORD flag = 0;
+    SIZE_T numRead = 0;
+
+    if(ReadProcessMemory(hProcess, flagRemote, &flag, sizeof(flag), &numRead) && flag == 1)
+    {
+      done = true;
+      break;
+    }
+  }
+
+  // re-suspend the thread. It is either spinning in the stub's jmp $ loop, or
+  // (in the timeout case) still somewhere inside the called function.
+  SuspendThread(hThread);
+
+  if(done)
+  {
+    VirtualFreeEx(hProcess, stubMem, 0, MEM_RELEASE);
+  }
+  else
+  {
+    // don't free the stub on timeout - the thread may still execute it
+    RDCERR("Timed out after %ums waiting for hijacked call", timeoutMS);
+  }
+
+  return done;
+}
+
+// If the process was freshly created suspended (or is otherwise suspended
+// early in startup), returns a handle to its main thread ready for hijacking.
+// A freshly created process only has a single thread, so we enumerate the
+// process's threads and only consider hijacking when exactly one exists and
+// it is suspended. Note that the initial thread ID is NOT the same as the
+// process ID on Windows. Returns NULL if the thread can't be opened or is
+// running, in which case the classic CreateRemoteThread paths must be used.
+static HANDLE GetSuspendedMainThread(DWORD pid)
+{
+  // enumerate all threads belonging to this process. The snapshot pid
+  // parameter is ignored for TH32CS_SNAPTHREAD, we filter by owner ourselves.
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+
+  if(snap == INVALID_HANDLE_VALUE)
+    return NULL;
+
+  THREADENTRY32 te;
+  RDCEraseEl(te);
+  te.dwSize = sizeof(te);
+
+  DWORD mainTid = 0;
+  int threadCount = 0;
+
+  if(Thread32First(snap, &te))
+  {
+    do
+    {
+      if(te.th32OwnerProcessID == pid)
+      {
+        threadCount++;
+        mainTid = te.th32ThreadID;
+      }
+    } while(Thread32Next(snap, &te));
+  }
+
+  CloseHandle(snap);
+
+  // more than one thread means the process is up and running (or was created
+  // with extra threads) - not safe to hijack
+  if(threadCount != 1 || mainTid == 0)
+    return NULL;
+
+  HANDLE hThread = OpenThread(
+      THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION,
+      FALSE, mainTid);
+
+  if(hThread == NULL)
+    return NULL;
+
+  // suspend (incrementing the count), check whether the thread was already
+  // suspended, then undo our suspension to restore the previous state
+  DWORD prev = SuspendThread(hThread);
+
+  if(prev == 0)
+  {
+    // thread was running - not safe to hijack
+    ResumeThread(hThread);
+    CloseHandle(hThread);
+    return NULL;
+  }
+
+  ResumeThread(hThread);
+
+  return hThread;
+}
+
+// Restores the original context saved in hj, leaving the thread suspended.
+static void RestoreHijackedThread(HANDLE hThread, HijackState &hj)
+{
+  if(!hj.saved)
+    return;
+
+  CONTEXT ctx = hj.origCtx;
+  ctx.ContextFlags = CONTEXT_FULL;
+
+  if(!SetThreadContext(hThread, &ctx))
+    RDCERR("Failed to restore hijacked thread context: %u", GetLastError());
+}
+
+// Reads the remote EXE entry point from the process PEB + PE headers.
+static bool GetRemoteEntryPoint(HANDLE hProcess, uintptr_t &entryPoint)
+{
+  typedef LONG(NTAPI * pNtQueryInformationProcess)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+  static pNtQueryInformationProcess ntQueryInfo = NULL;
+
+  if(ntQueryInfo == NULL)
+  {
+    ntQueryInfo = (pNtQueryInformationProcess)GetProcAddress(
+        GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+
+    if(ntQueryInfo == NULL)
+    {
+      RDCERR("Couldn't find NtQueryInformationProcess in ntdll.dll");
+      return false;
+    }
+  }
+
+  // minimal PROCESS_BASIC_INFORMATION, so we don't need winternl.h
+  struct RemoteProcessBasicInformation
+  {
+    void *exitStatus;
+    void *pebBaseAddress;
+    void *reserved2[2];
+    uintptr_t uniqueProcessId;
+    void *reserved3;
+  };
+
+  RemoteProcessBasicInformation pbi;
+  RDCEraseEl(pbi);
+
+  if(ntQueryInfo(hProcess, 0 /* ProcessBasicInformation */, &pbi, sizeof(pbi), NULL) != 0)
+  {
+    RDCERR("NtQueryInformationProcess failed: %u", GetLastError());
+    return false;
+  }
+
+  // PEB->ImageBaseAddress sits at offset 0x10 on x64 (0x8 holds the Mutant
+  // handle there) and at offset 0x8 on x86
+  void *imageBase = NULL;
+
+#if ENABLED(RDOC_X64)
+  const size_t pebImageBaseOffset = 0x10;
+#else
+  const size_t pebImageBaseOffset = 0x8;
+#endif
+
+  if(!ReadProcessMemory(hProcess, (char *)pbi.pebBaseAddress + pebImageBaseOffset, &imageBase,
+                        sizeof(imageBase), NULL))
+  {
+    RDCERR("Couldn't read remote PEB image base: %u", GetLastError());
+    return false;
+  }
+
+  DWORD e_lfanew = 0;
+  if(!ReadProcessMemory(hProcess, (char *)imageBase + 0x3c, &e_lfanew, sizeof(e_lfanew), NULL))
+  {
+    RDCERR("Couldn't read remote DOS header: %u", GetLastError());
+    return false;
+  }
+
+  // IMAGE_NT_HEADERS is: Signature (4 bytes) + IMAGE_FILE_HEADER (20 bytes) +
+  // IMAGE_OPTIONAL_HEADER. AddressOfEntryPoint sits at offset 16 in the
+  // optional header and is a DWORD in both PE32 and PE32+.
+  DWORD entryRVA = 0;
+  if(!ReadProcessMemory(hProcess, (char *)imageBase + e_lfanew + 4 + 20 + 16, &entryRVA,
+                        sizeof(entryRVA), NULL))
+  {
+    RDCERR("Couldn't read remote PE header: %u", GetLastError());
+    return false;
+  }
+
+  entryPoint = (uintptr_t)imageBase + entryRVA;
+  return true;
+}
+
+// As InjectDLL, but loads the library by hijacking the (suspended) main
+// thread instead of via CreateRemoteThread.
+//
+// A CREATE_SUSPENDED process is suspended *before* LdrInitializeThunk, i.e.
+// before its statically imported DLLs (potentially including the graphics API)
+// are loaded. Hijacking at that point would let those imports load through
+// ntdll's internal loader path, bypassing the LoadLibrary hooks entirely, so
+// no graphics API would ever be detected. Instead we patch the EXE entry point
+// with a 2-byte spin loop, resume the thread to let it complete process
+// initialisation, wait for it to arrive at the entry point, then unpatch and
+// hijack from there - by which point all statically imported DLLs are loaded
+// and can be hooked directly.
+static bool InjectDLLThreadContext(HANDLE hProcess, HANDLE hThread, HijackState &hj,
+                                   rdcwstr libName)
+{
+  uintptr_t entryPoint = 0;
+
+  if(!GetRemoteEntryPoint(hProcess, entryPoint))
+  {
+    RDCERR("Couldn't locate remote EXE entry point");
+    return false;
+  }
+
+  RDCLOG("Hijack: EXE entry point located at 0x%llx", (unsigned long long)entryPoint);
+
+  BYTE origBytes[2] = {0, 0};
+  SIZE_T numBytes = 0;
+
+  if(!ReadProcessMemory(hProcess, (void *)entryPoint, origBytes, sizeof(origBytes), &numBytes) ||
+     numBytes != sizeof(origBytes))
+  {
+    RDCERR("Couldn't read remote entry point bytes: %u", GetLastError());
+    return false;
+  }
+
+  DWORD oldProtect = 0;
+
+  if(!VirtualProtectEx(hProcess, (void *)entryPoint, sizeof(origBytes), PAGE_EXECUTE_READWRITE,
+                       &oldProtect))
+  {
+    RDCERR("Couldn't make remote entry point writable: %u", GetLastError());
+    return false;
+  }
+
+  // jmp $ - a 2 byte infinite loop
+  const BYTE spin[2] = {0xEB, 0xFE};
+  SIZE_T numWritten = 0;
+
+  if(!WriteProcessMemory(hProcess, (void *)entryPoint, spin, sizeof(spin), &numWritten) ||
+     numWritten != sizeof(spin))
+  {
+    RDCERR("Couldn't patch remote entry point: %u", GetLastError());
+    VirtualProtectEx(hProcess, (void *)entryPoint, sizeof(origBytes), oldProtect, &oldProtect);
+    return false;
+  }
+
+  // let the thread run - it completes process initialisation (loading all
+  // statically imported DLLs) then spins forever at the entry point
+  if(ResumeThread(hThread) == (DWORD)-1)
+  {
+    RDCERR("ResumeThread failed: %u", GetLastError());
+    WriteProcessMemory(hProcess, (void *)entryPoint, origBytes, sizeof(origBytes), &numWritten);
+    VirtualProtectEx(hProcess, (void *)entryPoint, sizeof(origBytes), oldProtect, &oldProtect);
+    return false;
+  }
+
+  RDCLOG("Hijack: entry point patched, waiting for process initialisation to complete");
+
+  // wait until the thread reaches the entry point spin loop
+  bool reachedEntry = false;
+  CONTEXT ctx;
+  uint32_t elapsed = 0;
+
+  while(elapsed < 60000)
+  {
+    Sleep(10);
+    elapsed += 10;
+
+    RDCEraseEl(ctx);
+    ctx.ContextFlags = CONTEXT_FULL;
+
+    if(!GetThreadContext(hThread, &ctx))
+      break;
+
+#if ENABLED(RDOC_X64)
+    uintptr_t rip = (uintptr_t)ctx.Rip;
+#else
+    uintptr_t rip = (uintptr_t)ctx.Eip;
+#endif
+
+    if(rip == entryPoint || rip == entryPoint + 2)
+    {
+      reachedEntry = true;
+      break;
+    }
+  }
+
+  SuspendThread(hThread);
+
+  // restore the original entry point bytes
+  WriteProcessMemory(hProcess, (void *)entryPoint, origBytes, sizeof(origBytes), &numWritten);
+  VirtualProtectEx(hProcess, (void *)entryPoint, sizeof(origBytes), oldProtect, &oldProtect);
+
+  if(!reachedEntry)
+  {
+    RDCERR("Timed out waiting for process to reach its entry point");
+    // the thread is suspended with its context and entry point untouched, so
+    // the process can still run on normally (or a fallback can inject)
+    return false;
+  }
+
+  RDCLOG("Hijack: process reached its entry point after %ums, initialisation complete", elapsed);
+
+  // normalise the instruction pointer onto the entry point itself - the thread
+  // may be suspended at entryPoint+2, inside the (now removed) spin loop
+#if ENABLED(RDOC_X64)
+  ctx.Rip = (DWORD64)entryPoint;
+#else
+  ctx.Eip = (DWORD)entryPoint;
+#endif
+
+  if(!SetThreadContext(hThread, &ctx))
+  {
+    RDCERR("Couldn't normalise thread context on the entry point: %u", GetLastError());
+    return false;
+  }
+
+  wchar_t dllPath[MAX_PATH + 1] = {0};
+  wcscpy_s(dllPath, libName.c_str());
+
+  static HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
+
+  if(kernel32 == NULL)
+  {
+    RDCERR("Couldn't get handle for kernel32.dll");
+    return false;
+  }
+
+  uintptr_t loadLibraryW = (uintptr_t)GetProcAddress(kernel32, "LoadLibraryW");
+
+  if(loadLibraryW == 0)
+  {
+    RDCERR("Couldn't find LoadLibraryW in kernel32.dll");
+    return false;
+  }
+
+  void *remotePath = VirtualAllocEx(hProcess, NULL, sizeof(dllPath), MEM_COMMIT, PAGE_READWRITE);
+
+  if(remotePath == NULL)
+  {
+    RDCERR("Couldn't allocate remote memory for DLL '%ls': %u", libName.c_str(), GetLastError());
+    return false;
+  }
+
+  BOOL success = WriteProcessMemory(hProcess, remotePath, dllPath, sizeof(dllPath), &numWritten);
+
+  if(!success)
+  {
+    RDCERR("Couldn't write remote memory %p with dllPath '%ls': %u", remotePath, dllPath,
+           GetLastError());
+  }
+  else
+  {
+    // LoadLibraryW is stdcall on x86, so the callee pops the argument
+    success =
+        HijackedExec(hProcess, hThread, hj, loadLibraryW, (uintptr_t)remotePath, true, 30000);
+  }
+
+  VirtualFreeEx(hProcess, remotePath, 0, MEM_RELEASE);
+
+  return success != FALSE;
+}
+
+// As InjectFunctionCall, but runs the call on the hijacked main thread instead
+// of via CreateRemoteThread. The thread must be suspended when called, and is
+// left suspended on return.
+static void InjectFunctionCallThreadContext(HANDLE hProcess, HANDLE hThread, HijackState &hj,
+                                            uintptr_t renderdoc_remote, const char *funcName,
+                                            void *data, const size_t dataLen)
+{
+  if(dataLen == 0)
+  {
+    RDCERR("Invalid function call injection attempt");
+    return;
+  }
+
+  RDCDEBUG("Injecting call to %s", funcName);
+
+  HMODULE renderdoc_local = GetModuleHandleA(STRINGIZE(RDOC_BASE_NAME) ".dll");
+
+  uintptr_t func_local = (uintptr_t)GetProcAddress(renderdoc_local, funcName);
+
+  // we've found the function in our local instance of the module, now
+  // calculate the offset and so get the function in the remote module (which
+  // might be loaded at a different base address)
+  uintptr_t func_remote = func_local + renderdoc_remote - (uintptr_t)renderdoc_local;
+
+  void *remoteMem = VirtualAllocEx(hProcess, NULL, dataLen, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+  SIZE_T numWritten;
+  WriteProcessMemory(hProcess, remoteMem, data, dataLen, &numWritten);
+
+  // INTERNAL_* functions are __cdecl on x86, so the caller pops the argument
+  HijackedExec(hProcess, hThread, hj, func_remote, (uintptr_t)remoteMem, false, 10000);
+
+  ReadProcessMemory(hProcess, remoteMem, data, dataLen, &numWritten);
+
+  VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
+}
+
 void InjectDLL(HANDLE hProcess, rdcwstr libName)
 {
   wchar_t dllPath[MAX_PATH + 1] = {0};
@@ -735,7 +1337,7 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
 
       renderdocPath[idx] = 0;
 
-      wcscat_s(renderdocPath, L"\\Win32\\Development\\renderdoccmd.exe");
+      wcscat_s(renderdocPath, L"\\Win32\\Development\\rendertestcmd.exe");
     }
 
     if(!devLocation)
@@ -748,7 +1350,7 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
 
         renderdocPath[idx] = 0;
 
-        wcscat_s(renderdocPath, L"\\Win32\\Release\\renderdoccmd.exe");
+        wcscat_s(renderdocPath, L"\\Win32\\Release\\rendertestcmd.exe");
       }
     }
 
@@ -763,7 +1365,7 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
         *slash = 0;
 
       // append path
-      wcscat_s(renderdocPath, L"\\x86\\renderdoccmd.exe");
+      wcscat_s(renderdocPath, L"\\x86\\rendertestcmd.exe");
     }
 #else
     // if it looks like we're in the development environment, look for the alternate bitness in the
@@ -775,7 +1377,7 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
 
       renderdocPath[idx] = 0;
 
-      wcscat_s(renderdocPath, L"\\x64\\Development\\renderdoccmd.exe");
+      wcscat_s(renderdocPath, L"\\x64\\Development\\rendertestcmd.exe");
     }
 
     if(!devLocation)
@@ -788,7 +1390,7 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
 
         renderdocPath[idx] = 0;
 
-        wcscat_s(renderdocPath, L"\\x64\\Release\\renderdoccmd.exe");
+        wcscat_s(renderdocPath, L"\\x64\\Release\\rendertestcmd.exe");
       }
     }
 
@@ -808,7 +1410,7 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
         *slash = 0;
 
       // append path
-      wcscat_s(renderdocPath, L"\\renderdoccmd.exe");
+      wcscat_s(renderdocPath, L"\\rendertestcmd.exe");
     }
 #endif
 
@@ -970,11 +1572,49 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
     return {ResultCode::Succeeded, (uint32_t)exitCode};
   }
 
-  InjectDLL(hProcess, renderdocPath);
+  // If the target process was freshly created and is still suspended (the
+  // normal case when launching a program from RenderDoc), hijack its main
+  // thread to perform the injection via SetThreadContext instead of
+  // CreateRemoteThread, which is a well-known injection vector commonly
+  // detected and blocked by anti-cheat or crash reporting systems.
+  HANDLE hMainThread = GetSuspendedMainThread(pid);
+  HijackState hijackState = {};
+
+  RDCLOG("Process %lu: main thread is %s", pid,
+         hMainThread != NULL ? "suspended - hijack injection will be used" :
+                               "not suspended - CreateRemoteThread injection will be used");
+
+  if(hMainThread != NULL)
+  {
+    if(!InjectDLLThreadContext(hProcess, hMainThread, hijackState, renderdocPath))
+    {
+      // hijacking failed - restore the thread to a safe suspended state and
+      // fall back to the classic CreateRemoteThread injection
+      RDCLOG("Process %lu: hijack injection FAILED, falling back to CreateRemoteThread", pid);
+      RestoreHijackedThread(hMainThread, hijackState);
+      CloseHandle(hMainThread);
+      hMainThread = NULL;
+    }
+  }
+
+  if(hMainThread == NULL)
+    InjectDLL(hProcess, renderdocPath);
 
   const char *rdoc_dll = STRINGIZE(RDOC_BASE_NAME);
 
   uintptr_t loc = FindRemoteDLL(pid, STRINGIZE(RDOC_BASE_NAME) ".dll");
+
+  RDCLOG("Process %lu: %s.dll %s", pid, rdoc_dll,
+         loc != 0 ? StringFormat::Fmt("loaded at 0x%llx", (unsigned long long)loc).c_str() :
+                    "was NOT found in the process");
+
+  auto RunInjectedCall = [&](const char *funcName, void *data, size_t dataLen) {
+    if(hMainThread != NULL)
+      InjectFunctionCallThreadContext(hProcess, hMainThread, hijackState, loc, funcName, data,
+                                      dataLen);
+    else
+      InjectFunctionCall(hProcess, loc, funcName, data, dataLen);
+  };
 
   rdcpair<RDResult, uint32_t> result = {ResultCode::Succeeded, 0};
 
@@ -991,18 +1631,18 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
     // safe to cast away the const as we know these functions don't modify the parameters
 
     if(!capturefile.empty())
-      InjectFunctionCall(hProcess, loc, "INTERNAL_SetCaptureFile", (void *)capturefile.c_str(),
+      RunInjectedCall("INTERNAL_SetCaptureFile", (void *)capturefile.c_str(),
                          capturefile.size() + 1);
 
     rdcstr debugLogfile = RDCGETLOGFILE();
 
-    InjectFunctionCall(hProcess, loc, "INTERNAL_SetDebugLogFile", (void *)debugLogfile.c_str(),
+    RunInjectedCall("INTERNAL_SetDebugLogFile", (void *)debugLogfile.c_str(),
                        debugLogfile.size() + 1);
 
-    InjectFunctionCall(hProcess, loc, "INTERNAL_SetCaptureOptions", (CaptureOptions *)&opts,
+    RunInjectedCall("INTERNAL_SetCaptureOptions", (CaptureOptions *)&opts,
                        sizeof(CaptureOptions));
 
-    InjectFunctionCall(hProcess, loc, "INTERNAL_GetTargetControlIdent", &result.second,
+    RunInjectedCall("INTERNAL_GetTargetControlIdent", &result.second,
                        sizeof(result.second));
 
     if(!env.empty())
@@ -1017,18 +1657,26 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
         if(name == "")
           break;
 
-        InjectFunctionCall(hProcess, loc, "INTERNAL_EnvModName", (void *)name.c_str(),
+        RunInjectedCall("INTERNAL_EnvModName", (void *)name.c_str(),
                            name.size() + 1);
-        InjectFunctionCall(hProcess, loc, "INTERNAL_EnvModValue", (void *)value.c_str(),
+        RunInjectedCall("INTERNAL_EnvModValue", (void *)value.c_str(),
                            value.size() + 1);
-        InjectFunctionCall(hProcess, loc, "INTERNAL_EnvSep", &sep, sizeof(sep));
-        InjectFunctionCall(hProcess, loc, "INTERNAL_EnvMod", &mod, sizeof(mod));
+        RunInjectedCall("INTERNAL_EnvSep", &sep, sizeof(sep));
+        RunInjectedCall("INTERNAL_EnvMod", &mod, sizeof(mod));
       }
 
       // parameter is unused
       void *dummy = NULL;
-      InjectFunctionCall(hProcess, loc, "INTERNAL_ApplyEnvMods", &dummy, sizeof(dummy));
+      RunInjectedCall("INTERNAL_ApplyEnvMods", &dummy, sizeof(dummy));
     }
+  }
+
+  if(hMainThread != NULL)
+  {
+    // restore the original thread context. The thread remains suspended here -
+    // it is resumed by the caller (e.g. LaunchAndInjectIntoProcess) as normal.
+    RestoreHijackedThread(hMainThread, hijackState);
+    CloseHandle(hMainThread);
   }
 
   if(waitForExit)
@@ -1498,7 +2146,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
   renderdocPath = get_dirname(renderdocPath);
 
   // the native renderdoccmd.exe is always next to the dll. Wow32 will be somewhere else
-  rdcstr cmdpathNative = renderdocPath + "\\renderdoccmd.exe";
+  rdcstr cmdpathNative = renderdocPath + "\\rendertestcmd.exe";
   rdcstr cmdpathWow32;
 
   rdcstr shimpathNative = renderdocPath;
@@ -1506,8 +2154,8 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
 
 #if ENABLED(RDOC_X64)
 
-  // native shim is just renderdocshim64.dll
-  shimpathNative = renderdocPath + "\\renderdocshim64.dll";
+  // native shim is just rendertestshim64.dll
+  shimpathNative = renderdocPath + "\\rendertestshim64.dll";
 
   // if it looks like we're in the development environment, look for the alternate bitness in the
   // corresponding folder
@@ -1516,8 +2164,8 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
   {
     renderdocPath.erase(devLocation, ~0U);
 
-    shimpathWow32 = renderdocPath + "\\Win32\\Development\\renderdocshim32.dll";
-    cmdpathWow32 = renderdocPath + "\\Win32\\Development\\renderdoccmd.exe";
+    shimpathWow32 = renderdocPath + "\\Win32\\Development\\rendertestshim32.dll";
+    cmdpathWow32 = renderdocPath + "\\Win32\\Development\\rendertestcmd.exe";
   }
   else
   {
@@ -1527,22 +2175,22 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
     {
       renderdocPath.erase(devLocation, ~0U);
 
-      shimpathWow32 = renderdocPath + "\\Win32\\Release\\renderdocshim32.dll";
-      cmdpathWow32 = renderdocPath + "\\Win32\\Release\\renderdoccmd.exe";
+      shimpathWow32 = renderdocPath + "\\Win32\\Release\\rendertestshim32.dll";
+      cmdpathWow32 = renderdocPath + "\\Win32\\Release\\rendertestcmd.exe";
     }
   }
 
   // if we're not in the dev environment, assume it's under a x86\ subfolder
   if(devLocation < 0)
   {
-    shimpathWow32 = renderdocPath + "\\x86\\renderdocshim32.dll";
-    cmdpathWow32 = renderdocPath + "\\x86\\renderdoccmd.exe";
+    shimpathWow32 = renderdocPath + "\\x86\\rendertestshim32.dll";
+    cmdpathWow32 = renderdocPath + "\\x86\\rendertestcmd.exe";
   }
 
 #else
 
   // nothing fancy to do here for 32-bit, just point the shim next to our dll.
-  shimpathNative = renderdocPath + "\\renderdocshim32.dll";
+  shimpathNative = renderdocPath + "\\rendertestshim32.dll";
 
 #endif
 

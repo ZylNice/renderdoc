@@ -37,7 +37,7 @@
 #include "os/os_specific.h"
 #include "strings/string_utils.h"
 
-#define VERBOSE_DEBUG_HOOK OPTION_OFF
+#define VERBOSE_DEBUG_HOOK OPTION_ON
 
 // map from address of IAT entry, to original contents
 std::map<void **, void *> s_InstalledHooks;
