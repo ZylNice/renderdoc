@@ -25,6 +25,7 @@
 #include "d3d12_hooks.h"
 #include "driver/dxgi/dxgi_wrapped.h"
 #include "hooks/hooks.h"
+#include "hooks/inline_hook.h"
 #include "serialise/serialiser.h"
 #include "d3d12_command_queue.h"
 #include "d3d12_device.h"
@@ -595,9 +596,131 @@ public:
     GetD3D11On12On7.Register("d3d11on12.dll", "GetD3D11On12On7Interface",
                              GetD3D11On12On7Interface_hook);
 
+#if defined(_WIN64)
+    // Install inline hooks on the d3d12 export functions themselves. This catches callers that
+    // resolve entry points via protected paths which bypass IAT/GetProcAddress interception.
+    // If the DLLs are not loaded yet, a watcher thread installs the hooks the moment they
+    // appear, racing ahead of the game's device creation.
+    if(!RenderDoc::Inst().IsReplayApp())
+    {
+      if(GetModuleHandleA("d3d12.dll"))
+        InstallInlineHooks();
+
+      if(GetModuleHandleA("d3d12core.dll"))
+        InstallCoreInlineHooks();
+
+      if(s_InlineD3D12Installed == 0 || s_InlineCoreInstalled == 0)
+      {
+        HANDLE watcher = CreateThread(NULL, 0, &D3D12Hook::InlineHookWatcher, NULL, 0, NULL);
+        if(watcher)
+          CloseHandle(watcher);
+        else
+          RDCERR("D3D12 diagnostics: failed to start inline hook watcher thread");
+      }
+    }
+#endif
+
     m_RecurseSlot = Threading::AllocateTLSSlot();
     Threading::SetTLSValue(m_RecurseSlot, NULL);
   }
+
+#if defined(_WIN64)
+  static void InstallInlineHooks()
+  {
+    // one-shot guard - only attempt installation once
+    if(InterlockedCompareExchange(&s_InlineD3D12Installed, 1, 0) != 0)
+      return;
+
+    HMODULE mod = GetModuleHandleA("d3d12.dll");
+    if(!mod)
+    {
+      InterlockedExchange(&s_InlineD3D12Installed, 0);
+      return;
+    }
+
+    void *pCreate = (void *)GetProcAddress(mod, "D3D12CreateDevice");
+    void *pDebug = (void *)GetProcAddress(mod, "D3D12GetDebugInterface");
+    void *pIface = (void *)GetProcAddress(mod, "D3D12GetInterface");
+
+    if(pCreate)
+      s_TrampCreateDevice = InlineHook::Install(pCreate, (void *)&D3D12CreateDevice_hook);
+    if(pDebug)
+      s_TrampGetDebugInterface = InlineHook::Install(pDebug, (void *)&D3D12GetDebugInterface_hook);
+    if(pIface)
+      s_TrampGetInterface = InlineHook::Install(pIface, (void *)&D3D12GetInterface_hook);
+
+    RDCLOG("D3D12 diagnostics: inline hooks on d3d12.dll - CreateDevice %p (tramp %p), "
+           "GetDebugInterface %p (tramp %p), GetInterface %p (tramp %p)",
+           pCreate, s_TrampCreateDevice, pDebug, s_TrampGetDebugInterface, pIface,
+           s_TrampGetInterface);
+  }
+
+  static void InstallCoreInlineHooks()
+  {
+    // one-shot guard - only attempt installation once
+    if(InterlockedCompareExchange(&s_InlineCoreInstalled, 1, 0) != 0)
+      return;
+
+    HMODULE mod = GetModuleHandleA("d3d12core.dll");
+    if(!mod)
+    {
+      InterlockedExchange(&s_InlineCoreInstalled, 0);
+      return;
+    }
+
+    void *pCreate = (void *)GetProcAddress(mod, "D3D12CreateDevice");
+    void *pDebug = (void *)GetProcAddress(mod, "D3D12GetDebugInterface");
+    void *pIface = (void *)GetProcAddress(mod, "D3D12GetInterface");
+
+    if(pCreate)
+      s_TrampCreateDeviceCore = InlineHook::Install(pCreate, (void *)&D3D12CreateDevice_Core_hook);
+    if(pDebug)
+      s_TrampGetDebugInterfaceCore =
+          InlineHook::Install(pDebug, (void *)&D3D12GetDebugInterface_Core_hook);
+    if(pIface)
+      s_TrampGetInterfaceCore = InlineHook::Install(pIface, (void *)&D3D12GetInterface_Core_hook);
+
+    RDCLOG("D3D12 diagnostics: inline hooks on d3d12core.dll - CreateDevice %p (tramp %p), "
+           "GetDebugInterface %p (tramp %p), GetInterface %p (tramp %p)",
+           pCreate, s_TrampCreateDeviceCore, pDebug, s_TrampGetDebugInterfaceCore, pIface,
+           s_TrampGetInterfaceCore);
+  }
+
+  static DWORD WINAPI InlineHookWatcher(void *param)
+  {
+    uint64_t start = GetTickCount64();
+
+    // poll until both modules have appeared and been hooked. SwitchToThread keeps the reaction
+    // time well below a millisecond so we win the race against stealth loads that bypass the
+    // LoadLibrary interception.
+    while(GetTickCount64() - start < 10 * 60 * 1000)
+    {
+      bool d3d12Done = (s_InlineD3D12Installed != 0);
+      bool coreDone = (s_InlineCoreInstalled != 0);
+
+      if(!d3d12Done && GetModuleHandleA("d3d12.dll"))
+      {
+        InstallInlineHooks();
+        d3d12Done = true;
+        RDCLOG("D3D12 diagnostics: watcher installed inline hooks on d3d12.dll");
+      }
+
+      if(!coreDone && GetModuleHandleA("d3d12core.dll"))
+      {
+        InstallCoreInlineHooks();
+        coreDone = true;
+        RDCLOG("D3D12 diagnostics: watcher installed inline hooks on d3d12core.dll");
+      }
+
+      if(d3d12Done && coreDone)
+        break;
+
+      SwitchToThread();
+    }
+
+    return 0;
+  }
+#endif
 
   static HRESULT GetWrappedInterface(IUnknown *realUnk, REFIID riid, void **ppvInterface)
   {
@@ -716,6 +839,28 @@ private:
   HookedFunction<PFN_D3D12_GET_DEBUG_INTERFACE> GetDebugInterfaceCore;
   HookedFunction<PFN_D3D12_GET_INTERFACE> GetInterfaceCore;
   HookedFunction<PFN_D3D12_CREATE_DEVICE> CreateDeviceCore;
+
+  // Inline (detour-style) hooks on the d3d12 export functions themselves.
+  //
+  // Some games (especially with anti-cheat) resolve D3D12 entry points through
+  // protected paths that bypass IAT and GetProcAddress interception entirely,
+  // or load d3d12.dll/D3D12Core.dll via stealth paths and create the device
+  // before the IAT hooks can be applied. Patching the function prologue makes
+  // the interception independent of how the pointer was obtained.
+  //
+  // These hold trampolines calling onwards to the original function bodies.
+  // They are only installed on x64 (see inline_hook.h); on x86 they stay NULL
+  // and the hook functions fall back to the IAT-based orig pointers.
+  static void *s_TrampCreateDevice;
+  static void *s_TrampGetDebugInterface;
+  static void *s_TrampGetInterface;
+  static void *s_TrampCreateDeviceCore;
+  static void *s_TrampGetDebugInterfaceCore;
+  static void *s_TrampGetInterfaceCore;
+
+  // 0 = not attempted, 1 = inline hooks installed (attempted) on this module
+  static volatile LONG s_InlineD3D12Installed;
+  static volatile LONG s_InlineCoreInstalled;
 
   // re-entrancy detection (can happen in rare cases with e.g. fraps)
   uint64_t m_RecurseSlot = 0;
@@ -927,8 +1072,13 @@ private:
            "requested interface %s, output %p",
            pAdapter, MinimumFeatureLevel, ToStr(riid).c_str(), ppDevice);
 
-    PFN_D3D12_CREATE_DEVICE createFunc = d3d12hooks.CreateDevice();
-    RDCLOG("D3D12 diagnostics: registered real D3D12CreateDevice is %p", createFunc);
+    // prefer the inline-hook trampoline: the IAT-based orig may point at the patched function
+    // entry (which jumps straight back here), so it must not be called when inline hooks are live
+    PFN_D3D12_CREATE_DEVICE createFunc = (PFN_D3D12_CREATE_DEVICE)s_TrampCreateDevice;
+    if(!createFunc)
+      createFunc = d3d12hooks.CreateDevice();
+    RDCLOG("D3D12 diagnostics: registered real D3D12CreateDevice is %p (inline trampoline %p)",
+           createFunc, s_TrampCreateDevice);
 
     if(!createFunc)
     {
@@ -991,8 +1141,16 @@ private:
       return E_NOINTERFACE;
     }
 
+    // prefer the inline-hook trampoline (see D3D12CreateDevice_hook)
+    PFN_D3D12_GET_DEBUG_INTERFACE realFunc =
+        (PFN_D3D12_GET_DEBUG_INTERFACE)s_TrampGetDebugInterface;
+    if(!realFunc)
+      realFunc = d3d12hooks.GetDebugInterface();
+    if(!realFunc)
+      return E_NOINTERFACE;
+
     IUnknown *realUnk = NULL;
-    HRESULT real = d3d12hooks.GetDebugInterface()(riid, (void **)&realUnk);
+    HRESULT real = realFunc(riid, (void **)&realUnk);
 
     HRESULT hr = GetWrappedInterface(realUnk, riid, ppvDebug);
 
@@ -1019,8 +1177,15 @@ private:
       return E_NOINTERFACE;
     }
 
+    // prefer the inline-hook trampoline (see D3D12CreateDevice_hook)
+    PFN_D3D12_GET_INTERFACE realFunc = (PFN_D3D12_GET_INTERFACE)s_TrampGetInterface;
+    if(!realFunc)
+      realFunc = d3d12hooks.GetInterface();
+    if(!realFunc)
+      return E_NOINTERFACE;
+
     IUnknown *realUnk = NULL;
-    HRESULT real = d3d12hooks.GetInterface()(rclsid, riid, (void **)&realUnk);
+    HRESULT real = realFunc(rclsid, riid, (void **)&realUnk);
     RDCLOG("D3D12 diagnostics: real D3D12GetInterface returned %s, interface %p",
            ToStr(real).c_str(), realUnk);
 
@@ -1048,7 +1213,11 @@ private:
            "feature level %x, requested interface %s, output %p",
            pAdapter, MinimumFeatureLevel, ToStr(riid).c_str(), ppDevice);
 
-    PFN_D3D12_CREATE_DEVICE createFunc = d3d12hooks.CreateDeviceCore();
+    // prefer the inline-hook trampoline (see D3D12CreateDevice_hook)
+    PFN_D3D12_CREATE_DEVICE createFunc = (PFN_D3D12_CREATE_DEVICE)s_TrampCreateDeviceCore;
+
+    if(!createFunc)
+      createFunc = d3d12hooks.CreateDeviceCore();
 
     if(!createFunc)
     {
@@ -1083,7 +1252,12 @@ private:
       return E_NOINTERFACE;
     }
 
-    PFN_D3D12_GET_DEBUG_INTERFACE realFunc = d3d12hooks.GetDebugInterfaceCore();
+    // prefer the inline-hook trampoline (see D3D12CreateDevice_hook)
+    PFN_D3D12_GET_DEBUG_INTERFACE realFunc =
+        (PFN_D3D12_GET_DEBUG_INTERFACE)s_TrampGetDebugInterfaceCore;
+
+    if(!realFunc)
+      realFunc = d3d12hooks.GetDebugInterfaceCore();
 
     if(!realFunc)
     {
@@ -1128,7 +1302,11 @@ private:
       return E_NOINTERFACE;
     }
 
-    PFN_D3D12_GET_INTERFACE realFunc = d3d12hooks.GetInterfaceCore();
+    // prefer the inline-hook trampoline (see D3D12CreateDevice_hook)
+    PFN_D3D12_GET_INTERFACE realFunc = (PFN_D3D12_GET_INTERFACE)s_TrampGetInterfaceCore;
+
+    if(!realFunc)
+      realFunc = d3d12hooks.GetInterfaceCore();
 
     if(!realFunc)
     {
@@ -1171,6 +1349,15 @@ private:
 };
 
 D3D12Hook D3D12Hook::d3d12hooks;
+
+void *D3D12Hook::s_TrampCreateDevice = NULL;
+void *D3D12Hook::s_TrampGetDebugInterface = NULL;
+void *D3D12Hook::s_TrampGetInterface = NULL;
+void *D3D12Hook::s_TrampCreateDeviceCore = NULL;
+void *D3D12Hook::s_TrampGetDebugInterfaceCore = NULL;
+void *D3D12Hook::s_TrampGetInterfaceCore = NULL;
+volatile LONG D3D12Hook::s_InlineD3D12Installed = 0;
+volatile LONG D3D12Hook::s_InlineCoreInstalled = 0;
 
 HRESULT CreateD3D12_Internal(RealD3D12CreateFunction real, D3D12DevConfiguration *devConfig,
                              IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid,

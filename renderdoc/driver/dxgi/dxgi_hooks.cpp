@@ -25,12 +25,15 @@
 
 #include "core/core.h"
 #include "hooks/hooks.h"
+#include "hooks/inline_hook.h"
 #include "dxgi_wrapped.h"
 
 typedef HRESULT(WINAPI *PFN_CREATE_DXGI_FACTORY)(REFIID, void **);
 typedef HRESULT(WINAPI *PFN_CREATE_DXGI_FACTORY2)(UINT, REFIID, void **);
 typedef HRESULT(WINAPI *PFN_GET_DEBUG_INTERFACE)(REFIID, void **);
 typedef HRESULT(WINAPI *PFN_GET_DEBUG_INTERFACE1)(UINT, REFIID, void **);
+
+
 
 MIDL_INTERFACE("9F251514-9D4D-4902-9D60-18988AB7D4B5")
 IDXGraphicsAnalysis : public IUnknown
@@ -249,7 +252,7 @@ public:
   {
     RDCLOG("Registering DXGI hooks");
 
-    LibraryHooks::RegisterLibraryHook("dxgi.dll", NULL);
+    LibraryHooks::RegisterLibraryHook("dxgi.dll", &DXGIHook::OnDxgiLoaded);
 
     CreateDXGIFactory.Register("dxgi.dll", "CreateDXGIFactory", CreateDXGIFactory_hook);
     CreateDXGIFactory1.Register("dxgi.dll", "CreateDXGIFactory1", CreateDXGIFactory1_hook);
@@ -264,6 +267,91 @@ public:
 
 private:
   static DXGIHook dxgihooks;
+
+  static bool InlineActive()
+  {
+#if defined(_WIN64)
+    return s_InlineHooksInstalled;
+#else
+    return false;
+#endif
+  }
+
+  // Some games (notably those with anti-cheat/anti-debug protection) resolve
+  // CreateDXGIFactory1/2 via their own export-walking code and call the raw function pointer
+  // directly, bypassing the IAT hooks. The game then gets a REAL IDXGIFactory while the D3D12
+  // device/command-queue are wrapped, so CreateSwapChainForHwnd fails with E_NOINTERFACE when
+  // handed a wrapped queue. Install inline hooks (x64 only, like the D3D12 hooks) so every
+  // resolution path returns a wrapped factory. On x86 these pointers stay NULL and the IAT
+  // hooks alone are used, identical to previous behaviour.
+#if defined(_WIN64)
+  static bool s_InlineHooksInstalled;
+  static PFN_CREATE_DXGI_FACTORY s_TrampCreateFactory;
+  static PFN_CREATE_DXGI_FACTORY s_TrampCreateFactory1;
+  static PFN_CREATE_DXGI_FACTORY2 s_TrampCreateFactory2;
+
+  static void OnDxgiLoaded(void *mod, const char *name)
+  {
+    if(s_InlineHooksInstalled)
+      return;
+    s_InlineHooksInstalled = true;
+
+    void *pCreate = (void *)GetProcAddress((HMODULE)mod, "CreateDXGIFactory");
+    void *pCreate1 = (void *)GetProcAddress((HMODULE)mod, "CreateDXGIFactory1");
+    void *pCreate2 = (void *)GetProcAddress((HMODULE)mod, "CreateDXGIFactory2");
+
+    if(pCreate)
+      s_TrampCreateFactory =
+          (PFN_CREATE_DXGI_FACTORY)InlineHook::Install(pCreate, (void *)&CreateDXGIFactory_inline);
+    if(pCreate1)
+      s_TrampCreateFactory1 =
+          (PFN_CREATE_DXGI_FACTORY)InlineHook::Install(pCreate1, (void *)&CreateDXGIFactory1_inline);
+    if(pCreate2)
+      s_TrampCreateFactory2 = (PFN_CREATE_DXGI_FACTORY2)InlineHook::Install(
+          pCreate2, (void *)&CreateDXGIFactory2_inline);
+
+    RDCLOG("DXGI diagnostics: inline hooks on dxgi.dll - CreateFactory %p (tramp %p), "
+           "CreateFactory1 %p (tramp %p), CreateFactory2 %p (tramp %p)",
+           pCreate, (void *)s_TrampCreateFactory, pCreate1, (void *)s_TrampCreateFactory1, pCreate2,
+           (void *)s_TrampCreateFactory2);
+  }
+
+  // The inline detours call the real dxgi.dll implementation via the saved trampoline, then wrap.
+  // We must NOT route through the IAT-hooked function pointers (CreateDXGIFactory() etc) because
+  // those resolve back to our IAT hook / this detour and would recurse or double-wrap. The IAT
+  // hooks below skip their own wrapping whenever the inline hook is active.
+  static HRESULT WINAPI CreateDXGIFactory_inline(REFIID riid, void **ppFactory)
+  {
+    if(ppFactory)
+      *ppFactory = NULL;
+    HRESULT ret = s_TrampCreateFactory(riid, ppFactory);
+    if(SUCCEEDED(ret))
+      RefCountDXGIObject::HandleWrap("CreateDXGIFactory", riid, ppFactory);
+    return ret;
+  }
+
+  static HRESULT WINAPI CreateDXGIFactory1_inline(REFIID riid, void **ppFactory)
+  {
+    if(ppFactory)
+      *ppFactory = NULL;
+    HRESULT ret = s_TrampCreateFactory1(riid, ppFactory);
+    if(SUCCEEDED(ret))
+      RefCountDXGIObject::HandleWrap("CreateDXGIFactory1", riid, ppFactory);
+    return ret;
+  }
+
+  static HRESULT WINAPI CreateDXGIFactory2_inline(UINT Flags, REFIID riid, void **ppFactory)
+  {
+    if(ppFactory)
+      *ppFactory = NULL;
+    HRESULT ret = s_TrampCreateFactory2(Flags, riid, ppFactory);
+    if(SUCCEEDED(ret))
+      RefCountDXGIObject::HandleWrap("CreateDXGIFactory2", riid, ppFactory);
+    return ret;
+  }
+#else
+  static void OnDxgiLoaded(void *mod, const char *name) {}
+#endif
 
   RenderDocAnalysis m_RenderDocAnalysis;
   DummyDXGIInfoQueue m_DummyInfoQueue;
@@ -281,7 +369,9 @@ private:
       *ppFactory = NULL;
     HRESULT ret = dxgihooks.CreateDXGIFactory()(riid, ppFactory);
 
-    if(SUCCEEDED(ret))
+    // When the inline hook is active the call above went through the detour which already
+    // wrapped the factory, so only wrap here on the IAT-only path.
+    if(SUCCEEDED(ret) && !InlineActive())
       RefCountDXGIObject::HandleWrap("CreateDXGIFactory", riid, ppFactory);
 
     RDCLOG("DXGI diagnostics: CreateDXGIFactory returned %s, factory %p", ToStr(ret).c_str(),
@@ -296,7 +386,7 @@ private:
       *ppFactory = NULL;
     HRESULT ret = dxgihooks.CreateDXGIFactory1()(riid, ppFactory);
 
-    if(SUCCEEDED(ret))
+    if(SUCCEEDED(ret) && !InlineActive())
       RefCountDXGIObject::HandleWrap("CreateDXGIFactory1", riid, ppFactory);
 
     RDCLOG("DXGI diagnostics: CreateDXGIFactory1 returned %s, factory %p", ToStr(ret).c_str(),
@@ -312,7 +402,7 @@ private:
       *ppFactory = NULL;
     HRESULT ret = dxgihooks.CreateDXGIFactory2()(Flags, riid, ppFactory);
 
-    if(SUCCEEDED(ret))
+    if(SUCCEEDED(ret) && !InlineActive())
       RefCountDXGIObject::HandleWrap("CreateDXGIFactory2", riid, ppFactory);
 
     RDCLOG("DXGI diagnostics: CreateDXGIFactory2 returned %s, factory %p", ToStr(ret).c_str(),
@@ -384,3 +474,10 @@ private:
 };
 
 DXGIHook DXGIHook::dxgihooks;
+
+#if defined(_WIN64)
+bool DXGIHook::s_InlineHooksInstalled = false;
+PFN_CREATE_DXGI_FACTORY DXGIHook::s_TrampCreateFactory = NULL;
+PFN_CREATE_DXGI_FACTORY DXGIHook::s_TrampCreateFactory1 = NULL;
+PFN_CREATE_DXGI_FACTORY2 DXGIHook::s_TrampCreateFactory2 = NULL;
+#endif
