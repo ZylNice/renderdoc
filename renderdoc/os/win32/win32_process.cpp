@@ -1034,6 +1034,87 @@ void InjectFunctionCall(HANDLE hProcess, uintptr_t renderdoc_remote, const char 
   VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
 }
 
+void Process::FixBundledCRTForTarget(const wchar_t *appPath)
+{
+  if(!appPath || !*appPath)
+    return;
+
+  static const wchar_t *crtNames[] = {
+      L"msvcp140.dll",    L"msvcp140_1.dll",  L"msvcp140_2.dll",
+      L"vcruntime140.dll", L"vcruntime140_1.dll", L"ucrtbase.dll",
+  };
+
+  wchar_t exeDir[MAX_PATH] = {0};
+  wcsncpy_s(exeDir, appPath, MAX_PATH - 1);
+  wchar_t *slash = wcsrchr(exeDir, L'\\');
+  if(slash)
+    *slash = 0;
+
+  wchar_t systemDir[MAX_PATH] = {0};
+  GetSystemDirectoryW(systemDir, MAX_PATH);
+
+  // check the exe's own directory and a "runtime" subdirectory (NTE launcher layout)
+  for(int d = 0; d < 2; d++)
+  {
+    wchar_t dir[MAX_PATH] = {0};
+    if(d == 0)
+      swprintf_s(dir, MAX_PATH, L"%s", exeDir);
+    else
+      swprintf_s(dir, MAX_PATH, L"%s\\runtime", exeDir);
+
+    wchar_t probe[MAX_PATH] = {0};
+    swprintf_s(probe, MAX_PATH, L"%s\\msvcp140.dll", dir);
+    if(GetFileAttributesW(probe) == INVALID_FILE_ATTRIBUTES)
+      continue;
+
+    // only replace when the bundled CRT is older than what rendertest.dll can initialise against
+    bool replace = true;
+    DWORD verHandle = 0;
+    DWORD verSize = GetFileVersionInfoSizeW(probe, &verHandle);
+    if(verSize)
+    {
+      rdcarray<BYTE> verBuf;
+      verBuf.resize(verSize);
+      if(GetFileVersionInfoW(probe, verHandle, verSize, verBuf.data()))
+      {
+        VS_FIXEDFILEINFO *ffi = NULL;
+        UINT ffiLen = 0;
+        if(VerQueryValueW(verBuf.data(), L"\\", (LPVOID *)&ffi, &ffiLen) && ffi)
+        {
+          DWORD major = HIWORD(ffi->dwFileVersionMS);
+          DWORD minor = LOWORD(ffi->dwFileVersionMS);
+          replace = (major < 14) || (major == 14 && minor < 40);
+        }
+      }
+    }
+    if(!replace)
+      continue;
+
+    wchar_t backupDir[MAX_PATH] = {0};
+    swprintf_s(backupDir, MAX_PATH, L"%s\\crt_backup", dir);
+    if(GetFileAttributesW(backupDir) == INVALID_FILE_ATTRIBUTES)
+      CreateDirectoryW(backupDir, NULL);
+
+    for(size_t i = 0; i < ARRAY_COUNT(crtNames); i++)
+    {
+      wchar_t dst[MAX_PATH] = {0};
+      swprintf_s(dst, MAX_PATH, L"%s\\%s", dir, crtNames[i]);
+      wchar_t bak[MAX_PATH] = {0};
+      swprintf_s(bak, MAX_PATH, L"%s\\%s", backupDir, crtNames[i]);
+      wchar_t src[MAX_PATH] = {0};
+      swprintf_s(src, MAX_PATH, L"%s\\%s", systemDir, crtNames[i]);
+
+      if(GetFileAttributesW(dst) != INVALID_FILE_ATTRIBUTES &&
+         GetFileAttributesW(bak) == INVALID_FILE_ATTRIBUTES)
+        CopyFileW(dst, bak, TRUE);
+      if(GetFileAttributesW(src) != INVALID_FILE_ATTRIBUTES)
+        CopyFileW(src, dst, FALSE);
+    }
+
+    RDCLOG("FixBundledCRT: replaced bundled CRT in %ls with system CRT", dir);
+  }
+}
+
 static PROCESS_INFORMATION RunProcess(const rdcstr &app, const rdcstr &workingDir,
                                       const rdcstr &cmdLine,
                                       const rdcarray<EnvironmentModification> &env, bool internal,
@@ -1145,6 +1226,14 @@ static PROCESS_INFORMATION RunProcess(const rdcstr &app, const rdcstr &workingDi
       envString += StringFormat::UTF82Wide(it->second).c_str();
       envString.push_back(0);
     }
+  }
+
+  // Some games/launchers bundle an old CRT next to the exe (or in a runtime subdirectory) that
+  // rendertest.dll cannot initialise against. Replace it with the system CRT before creating the
+  // process so the DLL loads no matter which path resolved the CRT.
+  {
+    rdcwstr appWide = StringFormat::UTF82Wide(app);
+    Process::FixBundledCRTForTarget(appWide.c_str());
   }
 
   BOOL retValue = CreateProcessW(

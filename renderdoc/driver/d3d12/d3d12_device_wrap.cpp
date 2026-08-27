@@ -160,10 +160,15 @@ HRESULT WrappedID3D12Device::CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC *
     return m_pDevice->CreateCommandQueue(pDesc, riid, NULL);
 
   if(riid != __uuidof(ID3D12CommandQueue) && riid != __uuidof(ID3D12CommandQueue1))
+  {
+    RDCERR("CreateCommandQueue returning E_NOINTERFACE for GUID %s", ToStr(riid).c_str());
     return E_NOINTERFACE;
+  }
 
   void *realptr = NULL;
   HRESULT ret = m_pDevice->CreateCommandQueue(pDesc, riid, &realptr);
+  if(FAILED(ret))
+    RDCERR("CreateCommandQueue real call failed: %s", ToStr(ret).c_str());
 
   ID3D12CommandQueue *real = NULL;
   if(riid == __uuidof(ID3D12CommandQueue))

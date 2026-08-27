@@ -1654,6 +1654,13 @@ HRESULT WrappedID3D12Device::QueryInterface(REFIID riid, void **ppvObject)
     // return the real thing unwrapped and hope this is OK
     return m_pDevice->QueryInterface(riid, ppvObject);
   }
+  else if(riid == __uuidof(ID3D12Object))
+  {
+    // The base ID3D12Object interface (SetName/GetPrivateData/SetPrivateDataInterface) is
+    // metadata-only and not capture-relevant. Forward to the real device - some games (and
+    // middleware like NVIDIA NGX) query for it explicitly and treat E_NOINTERFACE as fatal.
+    return m_pDevice->QueryInterface(riid, ppvObject);
+  }
 
   return m_RefCounter.QueryInterface("ID3D12Device", riid, ppvObject);
 }

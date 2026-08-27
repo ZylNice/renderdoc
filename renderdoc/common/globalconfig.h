@@ -209,7 +209,10 @@ enum
 // include debug logs. This prints them all the time
 #define FORCE_DEBUG_LOGS OPTION_OFF
 // this strips them completely
-#define STRIP_DEBUG_LOGS OPTION_OFF
+// NOTE: stripped in this build - the debug-level hook spam (GetProcAddress/IAT patching) is a
+// massive overhead when injected into games with anti-cheat that resolve thousands of functions,
+// making startup take 30x longer. Comment/Warning/Error logs are unaffected.
+#define STRIP_DEBUG_LOGS OPTION_ON
 
 // disable unit tests on android and *BSD
 #if ENABLED(RDOC_ANDROID) || defined(__FreeBSD__)

@@ -50,6 +50,64 @@ typedef BOOL(WINAPI *PFN_CREATE_PROCESS_W)(LPCWSTR lpApplicationName, LPWSTR lpC
                                            LPSTARTUPINFOW lpStartupInfo,
                                            LPPROCESS_INFORMATION lpProcessInformation);
 
+typedef BOOL(WINAPI *PFN_CREATE_PROCESS_INTERNAL_W)(
+    HANDLE hToken, LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
+    LPSECURITY_ATTRIBUTES lpProcessAttributes, LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    BOOL bInheritHandles, DWORD dwCreationFlags, LPVOID lpEnvironment, LPCWSTR lpCurrentDirectory,
+    LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation, PHANDLE hNewToken);
+
+typedef BOOL(WINAPI *PFN_CREATE_PROCESS_INTERNAL_A)(
+    HANDLE hToken, LPCSTR lpApplicationName, LPSTR lpCommandLine,
+    LPSECURITY_ATTRIBUTES lpProcessAttributes, LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    BOOL bInheritHandles, DWORD dwCreationFlags, LPVOID lpEnvironment, LPCSTR lpCurrentDirectory,
+    LPSTARTUPINFOA lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation, PHANDLE hNewToken);
+
+typedef BOOL(WINAPI *PFN_CREATE_PROCESS_WITH_TOKEN_W)(
+    HANDLE hToken, DWORD dwLogonFlags, LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
+    DWORD dwCreationFlags, LPVOID lpEnvironment, LPCWSTR lpCurrentDirectory,
+    LPSTARTUPINFOW lpStartupInfo, LPPROCESS_INFORMATION lpProcessInformation);
+
+struct RDC_NT_UNICODE_STRING
+{
+  USHORT Length;
+  USHORT MaximumLength;
+  wchar_t *Buffer;
+};
+
+struct RDC_NT_CURDIR
+{
+  RDC_NT_UNICODE_STRING DosPath;
+  void *Handle;
+};
+
+// minimal layout of RTL_USER_PROCESS_PARAMETERS, only up to the fields we read
+struct RDC_NT_USER_PROCESS_PARAMETERS
+{
+  ULONG MaximumLength;
+  ULONG Length;
+  ULONG Flags;
+  ULONG DebugFlags;
+  void *ConsoleHandle;
+  ULONG ConsoleFlags;
+  void *StandardInput;
+  void *StandardOutput;
+  void *StandardError;
+  RDC_NT_CURDIR CurrentDirectory;
+  RDC_NT_UNICODE_STRING DllPath;
+  RDC_NT_UNICODE_STRING ImagePathName;
+  RDC_NT_UNICODE_STRING CommandLine;
+};
+
+typedef LONG(WINAPI *PFN_NT_CREATE_USER_PROCESS)(PHANDLE ProcessHandle, PHANDLE ThreadHandle,
+                                                 ULONG ProcessDesiredAccess,
+                                                 ULONG ThreadDesiredAccess,
+                                                 PVOID ProcessObjectAttributes,
+                                                 PVOID ThreadObjectAttributes, ULONG ProcessFlags,
+                                                 ULONG ThreadFlags, PVOID ProcessParameters,
+                                                 PVOID CreateInfo, PVOID AttributeList);
+
+#define RDC_THREAD_CREATE_FLAGS_CREATE_SUSPENDED 0x00000001
+
 typedef BOOL(WINAPI *PFN_CREATE_PROCESS_AS_USER_A)(
     HANDLE hToken, LPCSTR lpApplicationName, LPSTR lpCommandLine,
     LPSECURITY_ATTRIBUTES lpProcessAttributes, LPSECURITY_ATTRIBUTES lpThreadAttributes,
@@ -112,6 +170,25 @@ public:
 
     CreateProcessWithLogonW.Register("advapi32.dll", "CreateProcessWithLogonW",
                                      CreateProcessWithLogonW_hook);
+
+    // CreateProcessInternalW is what ShellExecuteEx / QProcess::startDetached and various shell
+    // helpers call inside the caller process - without hooking it, children launched that way
+    // (e.g. game launchers spawning the game via shell32) are invisible to hook-into-children.
+    CreateProcessInternalW.Register("kernelbase.dll", "CreateProcessInternalW",
+                                    CreateProcessInternalW_hook);
+    K32CreateProcessInternalW.Register("kernel32.dll", "CreateProcessInternalW",
+                                       CreateProcessInternalW_hook);
+    CreateProcessWithTokenW.Register("advapi32.dll", "CreateProcessWithTokenW",
+                                     CreateProcessWithTokenW_hook);
+    CreateProcessInternalA.Register("kernelbase.dll", "CreateProcessInternalA",
+                                    CreateProcessInternalA_hook);
+    K32CreateProcessInternalA.Register("kernel32.dll", "CreateProcessInternalA",
+                                       CreateProcessInternalA_hook);
+
+    // NtCreateUserProcess is the final user-mode gateway for *all* process creation on Win10+.
+    // Launchers that spawn children bypassing every CreateProcess* variant (direct ntdll use or
+    // shell helpers) are still caught here.
+    NtCreateUserProcess.Register("ntdll.dll", "NtCreateUserProcess", NtCreateUserProcess_hook);
 
     // handle API set exports if they exist. These don't really exist so we don't have to worry
     // about double hooking, and also they call into the 'real' implementation in kernelbase.dll
@@ -258,6 +335,13 @@ private:
   HookedFunction<decltype(&RegGetValueA)> RegGetValueAHook;
   HookedFunction<PFN_CREATE_PROCESS_A> CreateProcessA;
   HookedFunction<PFN_CREATE_PROCESS_W> CreateProcessW;
+
+  HookedFunction<PFN_CREATE_PROCESS_INTERNAL_W> CreateProcessInternalW;
+  HookedFunction<PFN_CREATE_PROCESS_INTERNAL_W> K32CreateProcessInternalW;
+  HookedFunction<PFN_CREATE_PROCESS_WITH_TOKEN_W> CreateProcessWithTokenW;
+  HookedFunction<PFN_CREATE_PROCESS_INTERNAL_A> CreateProcessInternalA;
+  HookedFunction<PFN_CREATE_PROCESS_INTERNAL_A> K32CreateProcessInternalA;
+  HookedFunction<PFN_NT_CREATE_USER_PROCESS> NtCreateUserProcess;
 
   HookedFunction<PFN_CREATE_PROCESS_A> API110CreateProcessA;
   HookedFunction<PFN_CREATE_PROCESS_W> API110CreateProcessW;
@@ -477,6 +561,15 @@ private:
         "aria2.exe",
         "curl.exe",
         "crashpad_handler.exe",
+        // CEF / browser helper processes are fragile under injection and never the capture
+        // target - skipping them keeps the launcher's web login components healthy.
+        "epicwebhelper.exe",
+        "ntebrowser.exe",
+        "ntewebbooster.exe",
+        // NVIDIA NGX/DLSS updater utility - games spawn it repeatedly during startup, and
+        // injecting it makes the spawn fail and get retried forever (game never finishes
+        // booting, white screen). It's a utility, never a capture target.
+        "nvngx",
     };
 
     for(const rdcstr &b : blocked)
@@ -522,6 +615,36 @@ private:
       {
         inject = false;
       }
+    }
+
+    // if we're injecting this child, make sure any bundled old CRT next to it is replaced with
+    // the system CRT *before* the process is created, so rendertest.dll can initialise in it.
+    if(inject)
+    {
+      wchar_t exe[MAX_PATH] = {0};
+      if(lpApplicationName && *lpApplicationName)
+      {
+        wcsncpy_s(exe, lpApplicationName, MAX_PATH - 1);
+      }
+      else if(lpCommandLine && *lpCommandLine)
+      {
+        const wchar_t *cur = lpCommandLine;
+        wchar_t *out = exe;
+        if(*cur == L'"')
+        {
+          cur++;
+          while(*cur && *cur != L'"' && (out - exe) < MAX_PATH - 1)
+            *out++ = *cur++;
+        }
+        else
+        {
+          while(*cur && *cur != L' ' && (out - exe) < MAX_PATH - 1)
+            *out++ = *cur++;
+        }
+        *out = 0;
+      }
+      if(exe[0] && wcsstr(exe, L":\\"))
+        Process::FixBundledCRTForTarget(exe);
     }
 
     return inject;
@@ -570,6 +693,118 @@ private:
           return syshooks.CreateProcessW()(lpApplicationName, lpCommandLine, lpProcessAttributes,
                                            lpThreadAttributes, bInheritHandles, flags, env,
                                            lpCurrentDirectory, lpStartupInfo, pi);
+        },
+        dwCreationFlags, ShouldInject(lpApplicationName, lpCommandLine), lpEnvironment,
+        lpProcessInformation);
+  }
+
+  static BOOL WINAPI CreateProcessInternalW_hook(
+      HANDLE hToken, __in_opt LPCWSTR lpApplicationName, __inout_opt LPWSTR lpCommandLine,
+      __in_opt LPSECURITY_ATTRIBUTES lpProcessAttributes,
+      __in_opt LPSECURITY_ATTRIBUTES lpThreadAttributes, __in BOOL bInheritHandles,
+      __in DWORD dwCreationFlags, __in_opt LPVOID lpEnvironment,
+      __in_opt LPCWSTR lpCurrentDirectory, __in LPSTARTUPINFOW lpStartupInfo,
+      __out LPPROCESS_INFORMATION lpProcessInformation, PHANDLE hNewToken)
+  {
+    return Hooked_CreateProcess(
+        "CreateProcessInternalW",
+        [=](DWORD flags, LPVOID env, LPPROCESS_INFORMATION pi) {
+          // prefer the kernelbase registration, fall back to the kernel32 one
+          PFN_CREATE_PROCESS_INTERNAL_W realFunc = syshooks.CreateProcessInternalW()
+                                                       ? syshooks.CreateProcessInternalW()
+                                                       : syshooks.K32CreateProcessInternalW();
+          return realFunc(hToken, lpApplicationName, lpCommandLine, lpProcessAttributes,
+                          lpThreadAttributes, bInheritHandles, flags, env, lpCurrentDirectory,
+                          lpStartupInfo, pi, hNewToken);
+        },
+        dwCreationFlags, ShouldInject(lpApplicationName, lpCommandLine), lpEnvironment,
+        lpProcessInformation);
+  }
+
+  static BOOL WINAPI CreateProcessInternalA_hook(
+      HANDLE hToken, __in_opt LPCSTR lpApplicationName, __inout_opt LPSTR lpCommandLine,
+      __in_opt LPSECURITY_ATTRIBUTES lpProcessAttributes,
+      __in_opt LPSECURITY_ATTRIBUTES lpThreadAttributes, __in BOOL bInheritHandles,
+      __in DWORD dwCreationFlags, __in_opt LPVOID lpEnvironment, __in_opt LPCSTR lpCurrentDirectory,
+      __in LPSTARTUPINFOA lpStartupInfo, __out LPPROCESS_INFORMATION lpProcessInformation,
+      PHANDLE hNewToken)
+  {
+    return Hooked_CreateProcess(
+        "CreateProcessInternalA",
+        [=](DWORD flags, LPVOID env, LPPROCESS_INFORMATION pi) {
+          PFN_CREATE_PROCESS_INTERNAL_A realFunc = syshooks.CreateProcessInternalA()
+                                                       ? syshooks.CreateProcessInternalA()
+                                                       : syshooks.K32CreateProcessInternalA();
+          return realFunc(hToken, lpApplicationName, lpCommandLine, lpProcessAttributes,
+                          lpThreadAttributes, bInheritHandles, flags, env, lpCurrentDirectory,
+                          lpStartupInfo, pi, hNewToken);
+        },
+        dwCreationFlags, ShouldInject(lpApplicationName, lpCommandLine), lpEnvironment,
+        lpProcessInformation);
+  }
+
+  static LONG WINAPI NtCreateUserProcess_hook(
+      PHANDLE ProcessHandle, PHANDLE ThreadHandle, ULONG ProcessDesiredAccess,
+      ULONG ThreadDesiredAccess, PVOID ProcessObjectAttributes, PVOID ThreadObjectAttributes,
+      ULONG ProcessFlags, ULONG ThreadFlags, PVOID pProcessParameters, PVOID CreateInfo,
+      PVOID AttributeList)
+  {
+    bool recursive = syshooks.CheckRecurse();
+
+    RDC_NT_USER_PROCESS_PARAMETERS *params = (RDC_NT_USER_PROCESS_PARAMETERS *)pProcessParameters;
+    const wchar_t *imagePath =
+        (params && params->ImagePathName.Buffer) ? params->ImagePathName.Buffer : NULL;
+    const wchar_t *cmdLine =
+        (params && params->CommandLine.Buffer) ? params->CommandLine.Buffer : NULL;
+
+    bool inject = !recursive && ShouldInject(imagePath, cmdLine);
+
+    RDCLOG("Process diagnostics: NtCreateUserProcess entered, recursive=%u, inject=%u, image=%ls",
+           recursive ? 1U : 0U, inject ? 1U : 0U, imagePath ? imagePath : L"(null)");
+
+    ULONG newThreadFlags = ThreadFlags;
+    if(inject)
+      newThreadFlags |= RDC_THREAD_CREATE_FLAGS_CREATE_SUSPENDED;
+
+    LONG ret = syshooks.NtCreateUserProcess()(
+        ProcessHandle, ThreadHandle, ProcessDesiredAccess, ThreadDesiredAccess,
+        ProcessObjectAttributes, ThreadObjectAttributes, ProcessFlags, newThreadFlags,
+        pProcessParameters, CreateInfo, AttributeList);
+
+    if(!recursive && ret >= 0 && inject)
+    {
+      DWORD pid = GetProcessId(*ProcessHandle);
+      RDCLOG("Process diagnostics: injecting child pid %lu created through NtCreateUserProcess",
+             pid);
+
+      rdcpair<RDResult, uint32_t> res = Process::InjectIntoProcess(
+          pid, {}, RenderDoc::Inst().GetCaptureFileTemplate(),
+          RenderDoc::Inst().GetCaptureOptions(), false);
+
+      if(res.first == ResultCode::Succeeded)
+        RenderDoc::Inst().AddChildProcess((uint32_t)pid, res.second);
+
+      // we forced suspension to inject at the entry point - resume if the caller didn't ask for it
+      if((ThreadFlags & RDC_THREAD_CREATE_FLAGS_CREATE_SUSPENDED) == 0)
+        ResumeThread(*ThreadHandle);
+    }
+
+    syshooks.EndRecurse();
+    return ret;
+  }
+
+  static BOOL WINAPI CreateProcessWithTokenW_hook(
+      HANDLE hToken, DWORD dwLogonFlags, __in_opt LPCWSTR lpApplicationName,
+      __inout_opt LPWSTR lpCommandLine, __in DWORD dwCreationFlags, __in_opt LPVOID lpEnvironment,
+      __in_opt LPCWSTR lpCurrentDirectory, __in LPSTARTUPINFOW lpStartupInfo,
+      __out LPPROCESS_INFORMATION lpProcessInformation)
+  {
+    return Hooked_CreateProcess(
+        "CreateProcessWithTokenW",
+        [=](DWORD flags, LPVOID env, LPPROCESS_INFORMATION pi) {
+          return syshooks.CreateProcessWithTokenW()(hToken, dwLogonFlags, lpApplicationName,
+                                                    lpCommandLine, flags, env, lpCurrentDirectory,
+                                                    lpStartupInfo, pi);
         },
         dwCreationFlags, ShouldInject(lpApplicationName, lpCommandLine), lpEnvironment,
         lpProcessInformation);
