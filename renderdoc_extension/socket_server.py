@@ -1,14 +1,17 @@
 """
 File-based IPC Server for RenderDoc MCP Bridge
 Uses file polling since RenderDoc's Python doesn't have socket/QtNetwork modules.
+
+This version uses a plain threading-based polling loop instead of Qt
+(QObject/QTimer), so it also works in builds where PySide2 is not available.
 """
 
 import json
 import os
-import traceback
 import tempfile
-
-from PySide2.QtCore import QObject, QTimer
+import threading
+import time
+import traceback
 
 
 # IPC directory
@@ -18,41 +21,42 @@ RESPONSE_FILE = os.path.join(IPC_DIR, "response.json")
 LOCK_FILE = os.path.join(IPC_DIR, "lock")
 
 
-class MCPBridgeServer(QObject):
+class MCPBridgeServer(object):
     """File-based IPC server for MCP bridge communication"""
 
     def __init__(self, host, port, handler, parent=None):
-        super(MCPBridgeServer, self).__init__(parent)
+        # host/port/parent are kept for API compatibility but not used
         self.handler = handler
-        self._timer = None
+        self._thread = None
         self._running = False
+        self._poll_interval = 0.1  # seconds
 
         # Create IPC directory
         if not os.path.exists(IPC_DIR):
             os.makedirs(IPC_DIR)
 
     def start(self):
-        """Start the server with polling"""
+        """Start the server with polling thread"""
         self._running = True
 
         # Clean up old files
         self._cleanup_files()
 
-        # Start polling timer (check every 100ms)
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._poll_request)
-        self._timer.start(100)
+        # Start polling thread (check every 100ms)
+        self._thread = threading.Thread(target=self._poll_loop, name="MCPBridgeServer")
+        self._thread.daemon = True
+        self._thread.start()
 
-        print("[MCP Bridge] File-based IPC server started")
+        print("[MCP Bridge] File-based IPC server started (threading mode)")
         print("[MCP Bridge] IPC directory: %s" % IPC_DIR)
         return True
 
     def stop(self):
         """Stop the server"""
         self._running = False
-        if self._timer:
-            self._timer.stop()
-            self._timer = None
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
         self._cleanup_files()
         print("[MCP Bridge] Server stopped")
 
@@ -68,6 +72,15 @@ class MCPBridgeServer(QObject):
                     os.remove(f)
             except Exception:
                 pass
+
+    def _poll_loop(self):
+        """Polling thread main loop"""
+        while self._running:
+            try:
+                self._poll_request()
+            except Exception:
+                traceback.print_exc()
+            time.sleep(self._poll_interval)
 
     def _poll_request(self):
         """Check for incoming request"""
