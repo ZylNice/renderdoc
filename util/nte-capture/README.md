@@ -130,7 +130,7 @@ CRT 替换已由 DLL 自动完成，**无需手动操作**。
 
 **可选修复（当前未启用，用户决定维持现状）**：
 - 调大 TDR 超时（注册表，需管理员 + 重启，非代码改动）：
-  `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers`，DWORD `TdrDelay = 60`。
+  `HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers`，DWORD `TdrDelay = 60`。
   让大快照跑完而不被系统重置。副作用：整机遇到真显卡死机时恢复也会变慢。
 - 代价提示：即便调大 TDR，1.5 万资源快照也会让游戏卡数秒（能截下，但慢）。
 - （代码层面备选，暂缓）：截帧时跳过辅助的 Intel/WARP D3D12 设备的初始状态快照，或缩小
