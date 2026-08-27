@@ -2,6 +2,8 @@
 Capture management service for RenderDoc.
 """
 
+import threading
+
 import renderdoc as rd
 
 
@@ -11,6 +13,7 @@ class CaptureManager:
     def __init__(self, ctx, invoke_fn):
         self.ctx = ctx
         self._invoke = invoke_fn
+        self._pending_open = None
 
     def get_capture_status(self):
         """Check if a capture is loaded and get API info"""
@@ -100,6 +103,23 @@ class CaptureManager:
         if not capture_path.lower().endswith(".rdc"):
             raise ValueError("Invalid file type. Expected .rdc file: %s" % capture_path)
 
+        # ctx.LoadCapture() performs Qt UI work and must run on the UI thread.
+        # When the IPC poll loop runs on a worker thread (builds without PySide2),
+        # defer the actual load to a UI-thread menu callback instead of calling
+        # it here (calling it off-thread crashes the application).
+        if threading.current_thread() is not threading.main_thread():
+            self._pending_open = capture_path
+            return {
+                "success": False,
+                "deferred": True,
+                "capture_path": capture_path,
+                "message": (
+                    "Capture open deferred: LoadCapture must run on the UI thread. "
+                    "In the RenderDoc UI, click 'Tools > MCP Bridge > Open Pending "
+                    "Capture' to complete opening this capture."
+                ),
+            }
+
         # Create ReplayOptions with defaults
         opts = rd.ReplayOptions()
 
@@ -145,3 +165,21 @@ class CaptureManager:
             pass
 
         return result
+
+    def has_pending_open(self):
+        """Check whether a deferred open_capture request is pending"""
+        return self._pending_open is not None
+
+    def open_pending_capture(self):
+        """
+        Execute a deferred open_capture request.
+
+        Must be called on the UI thread (e.g. from a menu callback).
+        Returns the open_capture result dict, or None if nothing is pending.
+        """
+        if not self._pending_open:
+            return None
+        path = self._pending_open
+        self._pending_open = None
+        # Reuse open_capture; we are on the main thread now
+        return self.open_capture(path)
