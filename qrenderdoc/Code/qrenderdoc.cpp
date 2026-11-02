@@ -607,6 +607,23 @@ int main(int argc, char *argv[])
       RENDERDOC_InitialiseReplay(env, coreargs);
     }
 
+    // rendertest: automatically fix Vulkan layer registration on every startup.
+    // Stock RenderDoc installs register a same-name VK_LAYER_RENDERDOC_Capture manifest
+    // (renderdoc.json) and the vulkan loader only honours one of them - if the stock one
+    // wins, its dll gets auto-loaded into target processes on vkCreateInstance and vulkan
+    // devices end up registered in the wrong (stock) build. Re-registering here removes
+    // competing manifests and ensures our layer wins. Needs HKLM write access (run
+    // elevated); if it fails the CaptureDialog warning will still be shown as before.
+    if(crashReportPath.isEmpty() && RENDERDOC_NeedVulkanLayerRegistration(NULL))
+    {
+      qInfo() << "Fixing Vulkan layer registration (removing competing RenderDoc layer manifests)";
+      RENDERDOC_UpdateVulkanLayerRegistration(true);
+
+      if(RENDERDOC_NeedVulkanLayerRegistration(NULL))
+        qWarning() << "Vulkan layer registration update failed - run elevated or use the "
+                      "CaptureDialog warning to fix it interactively";
+    }
+
 #if defined(RENDERDOC_PLATFORM_LINUX) && !defined(RENDERDOC_WINDOWING_WAYLAND)
     if(envChanged)
       unsetenv("QT_QPA_PLATFORM");

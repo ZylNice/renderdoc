@@ -269,6 +269,13 @@ bool ProcessImplicitLayersKey(HKEY key, const rdcstr &path, rdcarray<rdcstr> *ot
 
   rdcwstr VulkanLayerJSONFilename = StringFormat::UTF82Wide(VulkanLayerJSONBasename + ".json");
 
+  // when RDOC_BASE_NAME is customised (e.g. rendertest), the stock RenderDoc manifest
+  // filename no longer matches our basename, so explicitly recognise it as another
+  // install. Note our layer name itself (RENDERDOC_VULKAN_LAYER_NAME) is also
+  // fork-unique now, so registry co-existence would be harmless - we still prefer to
+  // keep the machine clean of stale manifests we know about.
+  rdcwstr stockJSONFilename = L"renderdoc.json";
+
   while(ret == ERROR_SUCCESS)
   {
     // convert the name here so we preserve casing
@@ -281,7 +288,8 @@ bool ProcessImplicitLayersKey(HKEY key, const rdcstr &path, rdcarray<rdcstr> *ot
     {
       thisRegistered = true;
     }
-    else if(wcsstr(name, VulkanLayerJSONFilename.c_str()) != NULL)
+    else if(wcsstr(name, VulkanLayerJSONFilename.c_str()) != NULL ||
+            wcsstr(name, stockJSONFilename.c_str()) != NULL)
     {
       if(otherJSONs)
         otherJSONs->push_back(utf8name);

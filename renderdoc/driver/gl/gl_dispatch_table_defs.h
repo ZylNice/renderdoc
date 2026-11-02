@@ -4775,7 +4775,7 @@
   UnsupportedWrapper1(void, glEdgeFlagv, const GLboolean *, flag); \
   UnsupportedWrapper2(void, glEGLImageTargetRenderbufferStorageOES, GLenum, target, GLeglImageOES, image); \
   UnsupportedWrapper3(void, glEGLImageTargetTexStorageEXT, GLenum, target, GLeglImageOES, image, const GLint*, attrib_list); \
-  UnsupportedWrapper2(void, glEGLImageTargetTexture2DOES, GLenum, target, GLeglImageOES, image); \
+  IgnoredWrapper2(void, glEGLImageTargetTexture2DOES, GLenum, target, GLeglImageOES, image); \
   UnsupportedWrapper3(void, glEGLImageTargetTextureStorageEXT, GLuint, texture, GLeglImageOES, image, const GLint*, attrib_list); \
   UnsupportedWrapper2(void, glElementPointerAPPLE, GLenum, type, const void *, pointer); \
   UnsupportedWrapper2(void, glElementPointerATI, GLenum, type, const void *, pointer); \
@@ -6507,6 +6507,26 @@
   ret HOOK_CC CONCAT(function, _renderdoc_hooked)(t1 p1, t2 p2) \
   { \
     glhook.UseUnusedSupportedFunction(STRINGIZE(function)); \
+    if(!CONCAT(unsupported_real_, function)) \
+      CONCAT(unsupported_real_, function) = \
+          (CONCAT(function, _hooktype))glhook.GetUnsupportedFunction(STRINGIZE(function)); \
+    return CONCAT(unsupported_real_, function)(p1, p2); \
+  } \
+  HOOK_EXPORT ret HOOK_CC GL_EXPORT_NAME(function)(t1 p1, t2 p2) \
+  { \
+    return CONCAT(function, _renderdoc_hooked)(p1, p2); \
+  } \
+  HOOK_EXPORT ret HOOK_CC function(t1 p1, t2 p2);
+
+// like UnsupportedWrapper but does NOT disable capturing - the call is simply
+// passed through and absent from the capture. Used for functions we don't
+// serialise but don't want to poison the whole session (e.g. EGLImage entry
+// points hit by video playback before real-time rendering starts).
+#define IgnoredWrapper2(ret, function, t1, p1, t2, p2) \
+  typedef ret(HOOK_CC *CONCAT(function, _hooktype))(t1 p1, t2 p2); \
+  CONCAT(function, _hooktype) CONCAT(unsupported_real_, function) = NULL; \
+  ret HOOK_CC CONCAT(function, _renderdoc_hooked)(t1 p1, t2 p2) \
+  { \
     if(!CONCAT(unsupported_real_, function)) \
       CONCAT(unsupported_real_, function) = \
           (CONCAT(function, _hooktype))glhook.GetUnsupportedFunction(STRINGIZE(function)); \

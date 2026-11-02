@@ -33,38 +33,14 @@
 #include "serialise/serialiser.h"
 #include "strings/string_utils.h"
 
-static const uint32_t TargetControlProtocolVersion = 9;
+// fork-rendertest: unique protocol version so our UI can never silently connect to an
+// official RenderDoc build's injected dll (same-machine double injection would otherwise
+// "work" but capture with the official, cascade-less code)
+static const uint32_t TargetControlProtocolVersion = 109;
 
 static bool IsProtocolVersionSupported(const uint32_t protocolVersion)
 {
-  // 2 -> 3 added a RDCDriver per capture
-  if(protocolVersion == 2)
-    return true;
-
-  // 3 -> 4 added active window cycle and window count packets
-  if(protocolVersion == 3)
-    return true;
-
-  // 4 -> 5 return frame number with new captures
-  if(protocolVersion == 4)
-    return true;
-
-  // 5 -> 6 return byte size with new captures
-  if(protocolVersion == 5)
-    return true;
-
-  // 6 -> 7 add 'request show' packet
-  if(protocolVersion == 6)
-    return true;
-
-  // 7 -> 8 add custom message for unsupported APIs
-  if(protocolVersion == 7)
-    return true;
-
-  // 8 -> 9 add capture titles
-  if(protocolVersion == 8)
-    return true;
-
+  // fork-rendertest: accept only our own version, do not interop with official builds
   if(protocolVersion == TargetControlProtocolVersion)
     return true;
 

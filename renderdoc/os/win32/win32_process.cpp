@@ -267,7 +267,8 @@ struct HijackState
 };
 
 static bool WriteStubCall(HANDLE hProcess, uintptr_t funcAddr, uintptr_t argAddr,
-                          bool x86CalleePops, void **stubMemOut, DWORD **flagOut)
+                          bool x86CalleePops, void **stubMemOut, DWORD **flagOut,
+                          void **resultOut)
 {
 #if ENABLED(RDOC_X64)
   // x64 stub (single calling convention, caller provides shadow space):
@@ -276,11 +277,12 @@ static bool WriteStubCall(HANDLE hProcess, uintptr_t funcAddr, uintptr_t argAddr
   //   mov rcx, <arg>            48 B9 imm64
   //   mov rax, <func>           48 B8 imm64
   //   call rax                  FF D0
+  //   mov [<result>], rax       48 A3 imm64
   //   mov rdx, <flag>           48 BA imm64
   //   mov dword ptr [rdx], 1    C7 02 01 00 00 00
   //   jmp $                     EB FE
-  const size_t stubSize = 64;
-  byte stub[64] = {0};
+  const size_t stubSize = 96;
+  byte stub[96] = {0};
   size_t o = 0;
 
   stub[o++] = 0x48;
@@ -306,6 +308,13 @@ static bool WriteStubCall(HANDLE hProcess, uintptr_t funcAddr, uintptr_t argAddr
   stub[o++] = 0xFF;
   stub[o++] = 0xD0;
 
+  // mov [result], rax   48 A3 <imm64>
+  stub[o++] = 0x48;
+  stub[o++] = 0xA3;
+  // the imm64 is patched later - record where it lives in the stub
+  const size_t resultOperandOffset = o;
+  o += sizeof(uintptr_t);
+
   // mov rdx, imm64   48 BA <imm64>
   stub[o++] = 0x48;
   stub[o++] = 0xBA;
@@ -329,10 +338,11 @@ static bool WriteStubCall(HANDLE hProcess, uintptr_t funcAddr, uintptr_t argAddr
   //   mov eax, <func>           B8 imm32
   //   call eax                  FF D0
   //   add esp, 4                83 C4 04   (cdecl only, omitted for stdcall)
+  //   mov [<result>], eax       A3 imm32
   //   mov dword ptr [<flag>], 1 C7 05 imm32 01 00 00 00
   //   jmp $                     EB FE
-  const size_t stubSize = 48;
-  byte stub[48] = {0};
+  const size_t stubSize = 64;
+  byte stub[64] = {0};
   size_t o = 0;
 
   stub[o++] = 0x68;
@@ -352,6 +362,12 @@ static bool WriteStubCall(HANDLE hProcess, uintptr_t funcAddr, uintptr_t argAddr
     stub[o++] = 0xC4;
     stub[o++] = 0x04;
   }
+
+  // mov [result], eax   A3 <imm32>
+  stub[o++] = 0xA3;
+  // the imm32 is patched later - record where it lives in the stub
+  const size_t resultOperandOffset = o;
+  o += sizeof(uint32_t);
 
   // mov dword ptr [imm32],], 1   C7 05 <imm32> 01 00 00 00
   stub[o++] = 0xC7;
@@ -374,8 +390,10 @@ static bool WriteStubCall(HANDLE hProcess, uintptr_t funcAddr, uintptr_t argAddr
   if(stubMem == NULL)
     return false;
 
-  // the completion flag lives in the last 4 bytes of the stub allocation
+  // the call result and completion flag live at the end of the stub allocation
+  uintptr_t resultAddr = (uintptr_t)stubMem + stubSize - sizeof(DWORD) - sizeof(uintptr_t);
   uintptr_t flagAddr = (uintptr_t)stubMem + stubSize - sizeof(DWORD);
+  memcpy(stub + resultOperandOffset, &resultAddr, sizeof(resultAddr));
   memcpy(stub + flagOperandOffset, &flagAddr, sizeof(flagAddr));
 
   SIZE_T numWritten = 0;
@@ -388,6 +406,7 @@ static bool WriteStubCall(HANDLE hProcess, uintptr_t funcAddr, uintptr_t argAddr
 
   *stubMemOut = stubMem;
   *flagOut = (DWORD *)flagAddr;
+  *resultOut = (void *)resultAddr;
   return true;
 }
 
@@ -395,13 +414,18 @@ static bool WriteStubCall(HANDLE hProcess, uintptr_t funcAddr, uintptr_t argAddr
 // It is resumed to execute the stub, then re-suspended once the completion flag
 // is set (or a timeout occurs). On the first call the original context is
 // saved into hj so it can later be restored with RestoreHijackedThread.
+// If resultOut is non-NULL, the called function's return value (rax/eax) is
+// read back into it on success.
 static bool HijackedExec(HANDLE hProcess, HANDLE hThread, HijackState &hj, uintptr_t funcAddr,
-                         uintptr_t argAddr, bool x86CalleePops, uint32_t timeoutMS)
+                         uintptr_t argAddr, bool x86CalleePops, uint32_t timeoutMS,
+                         uintptr_t *resultOut = NULL)
 {
   void *stubMem = NULL;
   DWORD *flagRemote = NULL;
+  void *resultRemote = NULL;
 
-  if(!WriteStubCall(hProcess, funcAddr, argAddr, x86CalleePops, &stubMem, &flagRemote))
+  if(!WriteStubCall(hProcess, funcAddr, argAddr, x86CalleePops, &stubMem, &flagRemote,
+                    &resultRemote))
   {
     RDCERR("Couldn't write remote stub for hijacked call");
     return false;
@@ -475,6 +499,13 @@ static bool HijackedExec(HANDLE hProcess, HANDLE hThread, HijackState &hj, uintp
 
   if(done)
   {
+    if(resultOut)
+    {
+      SIZE_T numRead = 0;
+      if(!ReadProcessMemory(hProcess, resultRemote, resultOut, sizeof(*resultOut), &numRead))
+        RDCWARN("Couldn't read back hijacked call result: %u", GetLastError());
+    }
+
     VirtualFreeEx(hProcess, stubMem, 0, MEM_RELEASE);
   }
   else
@@ -806,8 +837,55 @@ static bool InjectDLLThreadContext(HANDLE hProcess, HANDLE hThread, HijackState 
   else
   {
     // LoadLibraryW is stdcall on x86, so the callee pops the argument
-    success =
-        HijackedExec(hProcess, hThread, hj, loadLibraryW, (uintptr_t)remotePath, true, 30000);
+    uintptr_t remoteModule = 0;
+    success = HijackedExec(hProcess, hThread, hj, loadLibraryW, (uintptr_t)remotePath, true, 30000,
+                           &remoteModule);
+
+    if(success && remoteModule == 0)
+    {
+      // the stub ran to completion but LoadLibraryW returned NULL - fetch the
+      // error code from the same thread (GetLastError is per-thread state)
+      uintptr_t getLastError = (uintptr_t)GetProcAddress(kernel32, "GetLastError");
+      uintptr_t lastError = 0;
+
+      if(getLastError != 0)
+        HijackedExec(hProcess, hThread, hj, getLastError, 0, true, 5000, &lastError);
+
+      rdcstr errDesc;
+      switch((uint32_t)lastError)
+      {
+        case ERROR_ACCESS_DENIED:
+          errDesc = "ERROR_ACCESS_DENIED (5) - access denied, possibly blocked by AV/anti-cheat";
+          break;
+        case ERROR_MOD_NOT_FOUND:
+          errDesc = "ERROR_MOD_NOT_FOUND (126) - the DLL or one of its dependencies was not found";
+          break;
+        case ERROR_PROC_NOT_FOUND: errDesc = "ERROR_PROC_NOT_FOUND (127)"; break;
+        case ERROR_BAD_EXE_FORMAT:
+          errDesc = "ERROR_BAD_EXE_FORMAT (193) - not a valid DLL for this process architecture";
+          break;
+        case ERROR_INVALID_IMAGE_HASH:
+          errDesc =
+              "ERROR_INVALID_IMAGE_HASH (575) - blocked by process signature/mitigation policy "
+              "(typical of anti-cheat protection)";
+          break;
+        case ERROR_DLL_INIT_FAILED:
+          errDesc = "ERROR_DLL_INIT_FAILED (1114) - the DLL's entry point returned FALSE";
+          break;
+        default:
+          errDesc =
+              StringFormat::Fmt("error %u (0x%08x)", (uint32_t)lastError, (uint32_t)lastError);
+          break;
+      }
+
+      RDCERR("LoadLibraryW('%ls') returned NULL in the remote process: %s", libName.c_str(),
+             errDesc.c_str());
+    }
+    else if(success)
+    {
+      RDCLOG("LoadLibraryW('%ls') succeeded in the remote process, module 0x%llx",
+             libName.c_str(), (unsigned long long)remoteModule);
+    }
   }
 
   VirtualFreeEx(hProcess, remotePath, 0, MEM_RELEASE);

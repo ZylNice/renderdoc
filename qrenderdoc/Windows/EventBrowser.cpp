@@ -678,6 +678,10 @@ struct EventItemModel : public QAbstractItemModel
     // otherwise it's an action
     const ActionDescription *action = m_Actions[index.internalId()];
 
+    // NULL entries can appear in incomplete action trees from multi-device bridge captures
+    if(action == NULL)
+      return QModelIndex();
+
     // if it has no parent action, the parent is the root
     if(action->parent == NULL)
       return createIndex(0, 0, TagRoot);
@@ -820,6 +824,8 @@ struct EventItemModel : public QAbstractItemModel
       if(role == ROLE_EXACT_ACTION)
       {
         const ActionDescription *action = m_Actions[eid];
+        if(action == NULL)
+          return QVariant();
         return action->eventId == eid ? QVariant::fromValue(qulonglong(m_Actions[eid])) : QVariant();
       }
 
@@ -840,6 +846,9 @@ struct EventItemModel : public QAbstractItemModel
       if(index.column() == COL_ANNOTATION && role == Qt::DisplayRole)
       {
         const ActionDescription *action = m_Actions[eid];
+
+        if(action == NULL)
+          return QVariant();
 
         auto eidit =
             std::lower_bound(action->events.begin(), action->events.end(), eid,
@@ -1375,6 +1384,17 @@ bool EvaluateFilterSet(ICaptureContext &ctx, const rdcarray<EventFilter> &filter
                        QString name)
 {
   if(filters.empty())
+    return true;
+
+  // Some rows have no ActionDescription (ROLE_GROUPED_ACTION == 0). This is
+  // prominent with multi-device Vulkan bridge captures of non-presenting /
+  // offscreen devices, whose action tree is incomplete (see util/mumu-capture/
+  // README.md). The built-in flag filters below dereference `action` without a
+  // null check, so a NULL action crashes qrendertest with a recurring access
+  // violation at offset 0x6e250f in EventFilterCallback::_Do_call. Treat such
+  // rows as "no filter applies" and keep them visible, matching the
+  // always-visible semantics of root / capture-start rows.
+  if(!action)
     return true;
 
   bool accept = false;

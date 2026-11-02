@@ -923,7 +923,11 @@ private:
     if(m_LogcatThread)
       return;
 
-    m_LogcatThread = Android::ProcessLogcat(m_deviceID);
+    // DISABLED: the 400ms logcat polling launches an adb shell command 2.5x per second, which
+    // combined with heavy app logging overwhelms adbd on some devices (e.g. OnePlus/ColorOS)
+    // and causes the whole adb connection to wedge. Capture functionality is unaffected by
+    // losing logcat monitoring.
+    // m_LogcatThread = Android::ProcessLogcat(m_deviceID);
   }
 
   uint16_t m_portbase = 0;

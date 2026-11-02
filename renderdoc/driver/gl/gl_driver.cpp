@@ -2241,11 +2241,11 @@ void WrappedOpenGL::SwapBuffers(WindowingSystem winSystem, void *windowHandle)
 
   // kill any current capture that isn't application defined
   if(IsActiveCapturing(m_State) && !m_AppControlledCapture)
-    RenderDoc::Inst().EndFrameCapture(devWnd);
+    RenderDoc::Inst().EndVulkanBridgeFrameCapture(this, devWnd);
 
   if(RenderDoc::Inst().ShouldTriggerCapture(m_FrameCounter) && IsBackgroundCapturing(m_State))
   {
-    RenderDoc::Inst().StartFrameCapture(devWnd);
+    RenderDoc::Inst().StartVulkanBridgeFrameCapture(this, devWnd);
 
     m_AppControlledCapture = false;
     m_CapturedFrames.back().frameNumber = m_FrameCounter;
@@ -2302,6 +2302,17 @@ void WrappedOpenGL::StartFrameCapture(DeviceOwnedWindow devWnd)
   GLWindowingData existing = m_ActiveContexts[Threading::GetCurrentID()];
   GLWindowingData newContext = existing;
   GLWindowingData *pushChildSaved = MakeValidContextCurrent(existing, newContext);
+
+  // no context was ever active on this sharegroup and no backdoor context could be made
+  // current (e.g. cascade bridge starting this driver from another capturer's thread).
+  // Bail out gracefully instead of crashing below.
+  if(existing.ctx == NULL && pushChildSaved == NULL)
+  {
+    RDCWARN("Skipping GL capture start - no context available to make current");
+    m_State = CaptureState::BackgroundCapturing;
+    m_AppControlledCapture = false;
+    return;
+  }
 
   FrameDescription frame;
   frame.frameNumber = m_AppControlledCapture ? ~0U : m_FrameCounter;

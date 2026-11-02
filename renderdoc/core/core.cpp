@@ -2349,7 +2349,7 @@ void RenderDoc::StartVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwn
 
     if(m_VulkanBridgeCaptureOwner != NULL)
     {
-      RDCLOG("Vulkan bridge diagnostics: ignoring start from %p because owner %p is active", trigger,
+      RDCLOG("Cascade bridge diagnostics: ignoring start from %p because owner %p is active", trigger,
              m_VulkanBridgeCaptureOwner);
       return;
     }
@@ -2357,18 +2357,25 @@ void RenderDoc::StartVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwn
     for(const auto &it : m_DeviceFrameCapturers)
     {
       IFrameCapturer *cap = it.second;
-      if(cap && cap->GetFrameCaptureDriver() == RDCDriver::Vulkan && !capturers.contains(cap))
+      // cascade to same-process Vulkan and OpenGL device capturers. OpenGL followers
+      // are needed for emulators whose render devices are GL sharegroups in the same
+      // process as the presenting compositor (e.g. MuMu in GL mode)
+      if(cap && (cap->GetFrameCaptureDriver() == RDCDriver::Vulkan ||
+                 cap->GetFrameCaptureDriver() == RDCDriver::OpenGL) &&
+         !capturers.contains(cap))
         capturers.push_back(cap);
     }
 
-    if(trigger && trigger->GetFrameCaptureDriver() == RDCDriver::Vulkan && !capturers.contains(trigger))
+    // the owner/trigger is always captured regardless of driver, so a non-Vulkan
+    // presenter (e.g. an OpenGL compositor) can also start a bridged capture
+    if(trigger && !capturers.contains(trigger))
       capturers.push_back(trigger);
 
     m_VulkanBridgeCaptureOwner = trigger;
     m_VulkanBridgeCapturesActive = capturers;
   }
 
-  RDCLOG("Vulkan bridge diagnostics: starting %zu capturers from owner %p", capturers.size(),
+  RDCLOG("Cascade bridge diagnostics: starting %zu capturers from owner %p", capturers.size(),
          trigger);
 
   m_CaptureTitle.clear();
@@ -2379,7 +2386,7 @@ void RenderDoc::StartVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwn
     if(cap == trigger)
       captureWindow = devWnd;
 
-    RDCLOG("Vulkan bridge diagnostics: starting capturer %p, device %p, window %p", cap,
+    RDCLOG("Cascade bridge diagnostics: starting capturer %p, device %p, window %p", cap,
            captureWindow.device, captureWindow.windowHandle);
     cap->StartFrameCapture(captureWindow);
     m_CapturesActive++;
@@ -2395,7 +2402,7 @@ bool RenderDoc::EndVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwned
 
     if(m_VulkanBridgeCaptureOwner != trigger)
     {
-      RDCLOG("Vulkan bridge diagnostics: ignoring end from %p because owner is %p", trigger,
+      RDCLOG("Cascade bridge diagnostics: ignoring end from %p because owner is %p", trigger,
              m_VulkanBridgeCaptureOwner);
       return true;
     }
@@ -2406,7 +2413,7 @@ bool RenderDoc::EndVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwned
   }
 
   bool ret = true;
-  RDCLOG("Vulkan bridge diagnostics: ending %zu capturers from owner %p", capturers.size(), trigger);
+  RDCLOG("Cascade bridge diagnostics: ending %zu capturers from owner %p", capturers.size(), trigger);
 
   for(IFrameCapturer *cap : capturers)
   {
@@ -2414,7 +2421,7 @@ bool RenderDoc::EndVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceOwned
     if(cap == trigger)
       captureWindow = devWnd;
 
-    RDCLOG("Vulkan bridge diagnostics: ending capturer %p, device %p, window %p", cap,
+    RDCLOG("Cascade bridge diagnostics: ending capturer %p, device %p, window %p", cap,
            captureWindow.device, captureWindow.windowHandle);
     ret &= cap->EndFrameCapture(captureWindow);
     m_CapturesActive--;
@@ -2432,7 +2439,7 @@ bool RenderDoc::DiscardVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceO
 
     if(m_VulkanBridgeCaptureOwner != trigger)
     {
-      RDCLOG("Vulkan bridge diagnostics: ignoring discard from %p because owner is %p", trigger,
+      RDCLOG("Cascade bridge diagnostics: ignoring discard from %p because owner is %p", trigger,
              m_VulkanBridgeCaptureOwner);
       return true;
     }
@@ -2443,7 +2450,7 @@ bool RenderDoc::DiscardVulkanBridgeFrameCapture(IFrameCapturer *trigger, DeviceO
   }
 
   bool ret = true;
-  RDCLOG("Vulkan bridge diagnostics: discarding %zu capturers from owner %p", capturers.size(),
+  RDCLOG("Cascade bridge diagnostics: discarding %zu capturers from owner %p", capturers.size(),
          trigger);
 
   for(IFrameCapturer *cap : capturers)

@@ -140,9 +140,11 @@
 // Global constants
 enum
 {
-  RenderDoc_FirstTargetControlPort = 38920,
+  // fork-rendertest: moved off the stock 38920-38983 range so official RenderDoc builds
+  // injected into the same machine/process never collide with or get enumerated by our UI
+  RenderDoc_FirstTargetControlPort = 48920,
   RenderDoc_LastTargetControlPort = RenderDoc_FirstTargetControlPort + 63,
-  RenderDoc_RemoteServerPort = 39920,
+  RenderDoc_RemoteServerPort = 49920,
 
   RenderDoc_ForwardPortBase = 38990,
   RenderDoc_ForwardTargetControlOffset = 0,
@@ -150,8 +152,12 @@ enum
   RenderDoc_ForwardPortStride = 10,
 };
 
-#define RENDERDOC_VULKAN_LAYER_NAME "VK_LAYER_RENDERDOC_Capture"
-#define RENDERDOC_VULKAN_LAYER_VAR "ENABLE_VULKAN_RENDERDOC_CAPTURE"
+// fork-rendertest: unique layer name so our manifest no longer collides with official
+// RenderDoc's VK_LAYER_RENDERDOC_Capture in the registry (the vulkan loader dedupes implicit
+// layers by name). The enable var is renamed too, so a dormant official layer loaded into a
+// process we injected never activates.
+#define RENDERDOC_VULKAN_LAYER_NAME "VK_LAYER_RENDERDOC_Capture_RT"
+#define RENDERDOC_VULKAN_LAYER_VAR "ENABLE_VULKAN_RENDERTEST_CAPTURE"
 
 #define RENDERDOC_ANDROID_LIBRARY "libVkLayer_GLES_RenderDoc.so"
 

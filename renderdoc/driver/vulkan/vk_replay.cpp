@@ -5424,6 +5424,7 @@ void VulkanReplay::RefreshDerivedReplacements()
     // if there are replaced shaders in use, create a new pipeline with any/all replaced shaders.
     if(usesReplacedShader)
     {
+      RDCLOG("Rebuilding pipeline %s due to replaced shader", ToStr(origsrcid).c_str());
       VkPipeline pipe = VK_NULL_HANDLE;
 
       // check if this is a graphics or compute pipeline
@@ -5486,6 +5487,37 @@ void VulkanReplay::RefreshDerivedReplacements()
         VkResult vkr = m_pDriver->vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &pipeCreateInfo,
                                                             NULL, &pipe);
         CHECK_VKR(m_pDriver, vkr);
+
+        // If the original pipeline has a subpass 0 variant used when replaying to an event in the
+        // middle of an old-style render pass (see BindPipeline's subpass0 path), rebuild it with
+        // the replaced shaders too. Otherwise shader edits are compiled and registered but never
+        // visible, because isolated replay binds the stale subpass0pipe built at load time.
+        if(pipe != VK_NULL_HANDLE)
+        {
+          VulkanCreationInfo::Pipeline &origPipeInfo =
+              m_pDriver->m_CreationInfo.m_Pipeline[origsrcid];
+
+          if(origPipeInfo.subpass0pipe != VK_NULL_HANDLE)
+          {
+            VkGraphicsPipelineCreateInfo subpass0Info = pipeCreateInfo;
+            subpass0Info.renderPass =
+                m_pDriver->m_CreationInfo.m_RenderPass[origPipeInfo.renderpass]
+                    .loadRPs[origPipeInfo.subpass];
+            subpass0Info.subpass = 0;
+
+            VkPipeline subpass0pipe = VK_NULL_HANDLE;
+            vkr = m_pDriver->vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &subpass0Info, NULL,
+                                                       &subpass0pipe);
+            CHECK_VKR(m_pDriver, vkr);
+
+            if(subpass0pipe != VK_NULL_HANDLE)
+            {
+              RDCLOG("Rebuilt subpass0 variant for pipeline %s", ToStr(origsrcid).c_str());
+              deletequeue.push_back(origPipeInfo.subpass0pipe);
+              origPipeInfo.subpass0pipe = subpass0pipe;
+            }
+          }
+        }
       }
       else
       {
