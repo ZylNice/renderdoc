@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>终末地·大地图 — Vulkan Subpass 应用深度分析 20260928</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --border:#30363d;
+    --fg:#e6edf3; --fg-dim:#8b949e; --accent:#58a6ff; --accent2:#f78166;
+    --good:#3fb950; --warn:#d29922; --bad:#f85149; --violet:#bc8cff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.65;padding:24px;max-width:1280px;margin:0 auto}
+  h1{font-size:26px;border-bottom:2px solid var(--violet);padding-bottom:10px;margin-bottom:6px}
+  h2{font-size:20px;color:var(--accent);margin:34px 0 14px;border-left:4px solid var(--accent);padding-left:10px}
+  h3{font-size:16px;color:var(--violet);margin:20px 0 8px}
+  .meta{color:var(--fg-dim);font-size:13px;margin-bottom:24px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center}
+  .card .num{font-size:24px;font-weight:700;color:var(--violet)}
+  .card .lbl{font-size:12px;color:var(--fg-dim);margin-top:4px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+  th{background:var(--panel2);color:var(--accent);text-align:left;padding:8px 10px;border:1px solid var(--border);white-space:nowrap}
+  td{padding:6px 10px;border:1px solid var(--border);vertical-align:top}
+  tr:nth-child(even) td{background:rgba(255,255,255,0.02)}
+  code{background:#21262d;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12.5px;color:#ffa657}
+  .note{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--warn);border-radius:6px;padding:12px 16px;margin:14px 0;font-size:13.5px}
+  .note.blue{border-left-color:var(--accent)}
+  .note.green{border-left-color:var(--good)}
+  .note.violet{border-left-color:var(--violet)}
+  .note.red{border-left-color:var(--bad)}
+  .evid{color:var(--fg-dim);font-size:12px}
+  ul{margin:8px 0 8px 22px}
+  li{margin:4px 0}
+  .sp{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:14px 0}
+  .spcard{background:linear-gradient(180deg,#1a1430,#161b22);border:1px solid #5d3a8a;border-radius:10px;padding:14px;position:relative}
+  .spcard .spnum{position:absolute;top:-12px;left:14px;background:#5d3a8a;color:#fff;font-weight:700;font-size:12px;padding:2px 10px;border-radius:10px}
+  .spcard h4{color:var(--violet);font-size:14px;margin:6px 0 4px}
+  .spcard .ev{font-size:11.5px;color:var(--fg-dim)}
+  .spcard table{font-size:11.5px;margin:6px 0}
+  .spcard th,.spcard td{padding:3px 6px}
+  .arrow{color:var(--fg-dim);text-align:center;font-size:16px;margin:-2px 0}
+  .flow-lane{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;margin:10px 0;font-size:12.5px;overflow-x:auto}
+  .att{display:inline-block;background:#21262d;border:1px solid var(--border);border-radius:6px;padding:3px 10px;margin:2px;font-family:Consolas,monospace;font-size:11.5px}
+  .att.w{border-color:#1f6f3f;color:#7ee2a8}
+  .att.r{border-color:#8a4a1a;color:#ffb37e}
+  .att.d{border-color:#8a6d1a;color:#ffd86e}
+  .foot{margin-top:40px;padding-top:14px;border-top:1px solid var(--border);color:var(--fg-dim);font-size:12px}
+  .kbd{border:1px solid var(--border);border-radius:4px;padding:0 5px;font-family:Consolas,monospace;font-size:11.5px;color:var(--accent)}
+</style>
+</head>
+<body>
+
+<h1>《终末地》大地图 — Vulkan Subpass 应用深度分析</h1>
+<div class="meta">
+  截帧文件：<code>D:\Renderdoc 截帧\终末地\大地图.rdc</code> &nbsp;|&nbsp; API：Vulkan &nbsp;|&nbsp; 工具：RenderDoc 官方 qrenderdoc + MCP &nbsp;|&nbsp; 2026-09-28
+  &nbsp;|&nbsp; 系列报告：渲染流程总分析见同目录《终末地_大地图_渲染流程分析_20260928.html》
+</div>
+
+<h2>1. 摘要</h2>
+<div class="cards">
+  <div class="card"><div class="num">1</div><div class="lbl">个物理 RenderPass（E2621–E4803）</div></div>
+  <div class="card"><div class="num">5</div><div class="lbl">Subpass</div></div>
+  <div class="card"><div class="num">~530</div><div class="lbl">RenderPass 内 Draw 总数</div></div>
+  <div class="card"><div class="num">5</div><div class="lbl">颜色 Attachment + 1 Depth</div></div>
+  <div class="card"><div class="num">3</div><div class="lbl">条 vkCmdNextSubpass 证据链</div></div>
+</div>
+<div class="note violet">
+  <b>核心结论：</b>该帧把<b>植被深度预pass、GBuffer 填充、植被着色、延迟光照、特殊材质二次着色</b>五步全部合并进一个 5-Subpass 超大 RenderPass（E2621–E4803，约 530 个 Draw）。这是教科书级的移动端 TBR/TBDR 渲染架构：深度与 GBuffer 全程驻留 tile 内存（on-chip），延迟光照通过 subpass 内依赖直接消费 GBuffer，<b>完全避免了中间 attachment 在主存的往返</b>。RenderDoc 顶层把它拆成 3 个标签（Depth-only Pass #4 / Colour Pass #9 / Colour Pass #10），容易误读为 3 个独立 RenderPass。
+</div>
+
+<h2>2. 背景：Vulkan Subpass 与移动端 TBR 架构</h2>
+<ul>
+  <li><b>Tile-Based 渲染（TBR/TBDR）</b>：移动端 GPU（Adreno/Mali/PowerVR）把屏幕切成小块 tile，光栅化与像素着色在高速 on-chip 内存中逐 tile 完成。RenderPass 边界决定了 tile 何时把结果写回主存（Store）、何时重新读入（Load）。</li>
+  <li><b>Subpass</b>：同一 RenderPass 内的渲染阶段。规范保证先前 subpass 写入的 attachment 在后续 subpass 中以 <b>input attachment</b>（subpassLoad）读取时<b>无需离开 tile 内存</b>——这是 Vulkan 对 GBuffer 延迟渲染在移动端的原生支持，等价于 Metal 的 tile shader / 控制台上的 UAV barrier-free ping-pong。</li>
+  <li><b>收益</b>：一个 4MRT 的 GBuffer（本帧 1842×1036×4 张）若用传统"写回主存→再采样"的桌面式延迟管线，每个 attachment 要经历一次 Store + 一次采样 Load（约 4×7.6MB×2 的主存流量）；subpass 方案下这部分流量趋近于零，直接降低带宽与功耗——移动端帧耗时的第一制约因素。</li>
+  <li><b>代价</b>：整个 RenderPass 的所有 attachment 必须同时驻留（FBO 尺寸变大）；subpass 间自动插入依赖屏障，并行度受限于串行链。</li>
+</ul>
+
+<h2>3. 证据链：如何在 RenderDoc 中定位这个 5-Subpass RenderPass</h2>
+<table>
+<tr><th>#</th><th>证据</th><th>事件</th><th>说明</th></tr>
+<tr><td>1</td><td><code>vkCmdBeginRenderPass(DS=Clear)</code></td><td>E2621</td><td>整个大 RenderPass 的唯一入口；DS=Clear 即 Subpass 0 的初始布局（深度在 RP 开始时清一次）</td></tr>
+<tr><td>2</td><td><code>vkCmdNextSubpass() =&gt; 1</code></td><td>E3127</td><td>Subpass 0（植被深度）结束 → 进入 Subpass 1（GBuffer）。<b>两个事件之间没有任何 End/BeginRenderPass</b></td></tr>
+<tr><td>3</td><td><code>vkCmdNextSubpass() =&gt; 2</code></td><td>E4563</td><td>GBuffer → 植被着色</td></tr>
+<tr><td>4</td><td><code>vkCmdNextSubpass() =&gt; 3</code></td><td>E4600</td><td>植被着色 → 延迟光照</td></tr>
+<tr><td>5</td><td><code>vkCmdNextSubpass() =&gt; 4</code></td><td>E4637</td><td>延迟光照 → 特殊材质二次着色</td></tr>
+<tr><td>6</td><td><code>vkCmdEndRenderPass(C=Store, DS=Store)</code></td><td>E4803</td><td>唯一出口；颜色与深度在 RP 结束时一次性写回主存，供后续透明/后处理 pass 使用</td></tr>
+</table>
+<div class="note blue">
+  <b>识别技巧（qrenderdoc）</b>：① Event Browser 搜索 <span class="kbd">NextSubpass</span>；② 看 Event Browser 顶层标签——RenderDoc 会把每个 subpass 单独显示为 "Colour Pass #N" / "Depth-only Pass #N" 合成标签，<b>相邻标签间没有 Begin/EndRenderPass 即属同一物理 RenderPass</b>；③ Pipeline State 面板的 FBO/RenderPass 页显示当前 subpass 索引，且先前 subpass 的 attachment 会出现在绑定列表中。
+</div>
+
+<h2>4. 逐 Subpass 详细分析</h2>
+<div class="sp">
+  <div class="spcard"><span class="spnum">Subpass 0</span>
+    <h4>植被/实例层深度预pass</h4>
+    <div class="ev">E2621–E3126 · RenderDoc 标签：Depth-only Pass #4</div>
+    <table>
+      <tr><th>写</th><td><span class="att d">126274 Depth D24S8 1842×1036</span></td></tr>
+      <tr><th>读</th><td>—</td></tr>
+      <tr><th>Draw</th><td>119（12–54 索引×高实例；尾部 1536idx×62/56 草丛）</td></tr>
+    </table>
+    <div class="ev">取证：E2629 outputs=[] depth=126274；E3120/E3126 草丛实例收尾</div>
+  </div>
+  <div class="spcard"><span class="spnum">Subpass 1</span>
+    <h4>GBuffer 填充（主场景着色）</h4>
+    <div class="ev">E3127–E4562 · 标签：Colour Pass #9 (4 Targets + Depth)</div>
+    <table>
+      <tr><th>写</th><td><span class="att w">126758</span> <span class="att w">126262</span> <span class="att w">126279 RGBA8</span> <span class="att w">126282 RGBA8_SRGB</span> + <span class="att d">126274 D24S8</span></td></tr>
+      <tr><th>Draw</th><td>~330（最大 37839 索引；顶点拉取 VS + 8.4MB SSBO）</td></tr>
+    </table>
+    <div class="ev">取证：E3204 4 MRT 输出 + depth 126274；VS=132520</div>
+  </div>
+  <div class="spcard"><span class="spnum">Subpass 2</span>
+    <h4>植被二次着色（Alpha-Test 类）</h4>
+    <div class="ev">E4563–E4599 · 标签：Colour Pass #9</div>
+    <table>
+      <tr><th>写</th><td><b>与 SP1 完全相同的 4 MRT</b> + <span class="att d">126274</span></td></tr>
+      <tr><th>Draw</th><td>8（1536idx×62、336idx×40/8、36idx×47/9/1/2 等）</td></tr>
+    </table>
+    <div class="ev">取证：E4573 outputs=[126758,126262,126279,126282] depth=126274 —— 与 E3204 逐位一致</div>
+  </div>
+  <div class="spcard"><span class="spnum">Subpass 3</span>
+    <h4>延迟光照 + 阴影 + LUT（全屏）</h4>
+    <div class="ev">E4600–E4636 · 标签：Colour Pass #10</div>
+    <table>
+      <tr><th>读</th><td><span class="att r">126282 RGBA8_SRGB</span> <span class="att r">126279 RGBA8</span> <span class="att r">126274 D24S8(深度重建)</span>（GBuffer 消费）<br><span class="att r">126018/126021 D16 2048²</span>（CSM 级联×2）<br><span class="att r">126036 D32 512²</span>（点/聚光阴影）<br><span class="att r">7985 3D LUT R8 32³×6mip</span>（颜色分级）<br><span class="att r">34745 RGBA8_SRGB 1024²</span>（光cookie/IES）</td></tr>
+      <tr><th>写</th><td>光照输出 MRT（写入后供 SP4/后续使用）</td></tr>
+      <tr><th>Draw</th><td>9 × 全屏 3 顶点 Draw</td></tr>
+    </table>
+    <div class="ev">取证：E4604 PS=132615 资源绑定；CB：11440B（28 变量，含 float4x4 阴影矩阵阵列）、4192B（灯光数据）、1312B（22 矩阵，级联 VP）</div>
+  </div>
+  <div class="spcard"><span class="spnum">Subpass 4</span>
+    <h4>特殊材质二次着色（水/反射类）</h4>
+    <div class="ev">E4637–E4803 · 标签：Colour Pass #10</div>
+    <table>
+      <tr><th>写</th><td><b>MRT 降为 2</b>：<span class="att w">126758</span> <span class="att w">126262</span> + <span class="att d">126274</span></td></tr>
+      <tr><th>Draw</th><td>~38（重绘 SP1 的最大网格子集：37839/33729/29655/22137/17331 索引…）</td></tr>
+    </table>
+    <div class="ev">取证：E4643 outputs=[126758,126262] depth=126274 —— 写入目标比 SP1/SP2 少 2 个</div>
+  </div>
+</div>
+
+<h2>5. Attachment 生命周期与流向</h2>
+<div class="flow-lane">
+  <b>RenderPass E2621 → E4803（唯一一次 DS=Clear @begin，C=Store DS=Store @end）</b><br><br>
+  <span class="att d">126274 D24S8</span> ：SP0 写(清) → SP1 写 → SP2 写 → SP3 读(重建线性深度) → SP4 写 → <b>Store</b>（后续 Colour Pass #13/#14 以 DS=Load 继续使用同一深度）<br>
+  <span class="att w">126758</span>：SP1 写 → SP2 写 → SP4 写（光照/特殊材质） → Store<br>
+  <span class="att w">126262</span>：SP1 写 → SP2 写 → SP4 写 → Store<br>
+  <span class="att w">126279 RGBA8</span>：SP1 写 → SP2 写 → <b>SP3 读（input 消费）</b> → 不再写 → Store<br>
+  <span class="att w">126282 RGBA8_SRGB</span>：SP1 写 → SP2 写 → <b>SP3 读（input 消费）</b> → 不再写 → Store<br><br>
+  <b>外部输入（SP3 采样，RP 外资产）</b>：<span class="att r">126018</span> <span class="att r">126021</span>（2048² D16 CSM）· <span class="att r">126036</span>（512² D32）· <span class="att r">7985 3D LUT</span> · <span class="att r">34745</span>
+</div>
+<div class="note">
+  <b>设计解读：</b>126279/126282（albedo/材质参数类）在 SP1/SP2 写完后再无写入，纯粹作为 SP3 光照的输入——这是标准的"GBuffer 写入 → 光照读取"单向流，subpass 依赖链干净。126758/126262（光照/法线累加类）则贯穿 SP1/SP2/SP4 三次写入，SP4 收窄为 2MRT 正是为了只更新 HDR 颜色相关目标而不必绑满 4 个。
+</div>
+
+<h2>6. 该架构的收益评估（对照传统桌面式管线）</h2>
+<table>
+<tr><th>环节</th><th>传统管线（独立 RenderPass）</th><th>本帧 subpass 方案</th><th>收益</th></tr>
+<tr><td>GBuffer → 延迟光照</td><td>4 张 attachment Store 到主存（≈30MB 写）→ 光照 pass 再采样（≈30MB 读）</td><td>tile 内 input attachment 直读</td><td><b>省约 60MB/帧主存流量</b>（1842×1036×4B×4attachment 量级）</td></tr>
+<tr><td>深度预pass → GBuffer</td><td>深度 Store→Load，Early-Z 依赖深度回读</td><td>SP0→SP1 深度驻留 tile，Early-Z 无缝衔接</td><td>省一次全屏深度往返（≈7.6MB×2）+ 消除 RP 切换</td></tr>
+<tr><td>植被深度/着色分相</td><td>需 2 个 RP（深度 RP + 着色 RP），深度中间写回</td><td>SP0/SP2 与主流程同 RP</td><td>植被 alpha-test 几何的深度与着色分离且零额外带宽</td></tr>
+<tr><td>管线切换开销</td><td>5 个 RP ≈ 5 次 Begin/End + 布局转换屏障</td><td>1 个 RP，4 次 NextSubpass（驱动内轻量切换）</td><td>降低 CPU 提交与驱动验证开销</td></tr>
+</table>
+<div class="note green">
+  <b>工程评价：</b>这是 Unity SRP 或自研引擎在移动端 Vulkan 上做 deferred 的正确姿势（对照 URP 的移动端 forward、或 HDRP 的桌面 deferred）。CSM 阴影图（126018/126021/126036）在 RP 外的 Compute Pass #1 中生成（帧首 28 次 CopyImage 即级联合并），SP3 只读——阴影与主 RP 的依赖切分同样干净。
+</div>
+
+<h2>7. 风险与优化空间</h2>
+<ul>
+  <li><b>SP4 的 MRT 收窄（4→2）是亮点</b>：特殊材质 pass 只绑 126758/126262，减少了无谓的 attachment 驻留。但 SP1/SP2 全程绑满 4MRT+Depth，若部分几何（如纯 alpha-test 植被）实际只写 2–3 个目标，可再拆子通道进一步收窄（代价是 RP 复杂度上升，需权衡）。</li>
+  <li><b>input attachment vs 采样纹理</b>：SP3 的 PS 绑定列表里 GBuffer 以普通 sampled texture 形式出现（res18/res19/res20）。若驱动按普通采样处理（而非 subpassLoad 专用路径），在部分 Adreno 上仍会触发 tile 内回退。建议对着色器 SPIR-V 做 <code>SubpassLoad</code> 指令级确认（本报告未反汇编 SP3 的完整 SPIR-V，属待验证项）。</li>
+  <li><b>串行链</b>：SP0→SP1→SP2→SP3→SP4 是全串行依赖。SP4（水/反射）理论上只依赖 SP3 的光照结果，与 SP1 无数据依赖，若拆出独立 RP 与 SP3 并行提交，可提升队列并行度——但对单队列移动端 GPU 收益有限，属于低优先级。</li>
+  <li><b>深度生命周期</b>：126274 在 RP 结束时 DS=Store，被后续 Colour Pass #13/#14（DS=Load，透明层复用深度测试）消费——设计正确。但注意 E5321/E5330（合成/UI pass）又 DS=Clear 开了新深度，属正常分层。</li>
+  <li><b>可移植性提示</b>：该 5-Subpass 结构在 Mali（需要 subpass 数 ≤ 8 的 forward 混合限制）与 PowerVR（TBDR 原生受益最大）上行为不同；Adreno 的 flex render 对 subpass 依赖有自动优化。跨机型需验证 tile 驻留是否真正生效（ Snapdragon Profiler 的带宽计数器对比）。</li>
+</ul>
+
+<h2>8. 数据来源与取证</h2>
+<ul>
+  <li>事件序列：get_draw_calls（E2621 BeginRenderPass、E3127/E4563/E4600/E4637 NextSubpass⇒1–4、E4803 EndRenderPass(C=Store, DS=Store)，区间内无其他 RP 边界）</li>
+  <li>各 subpass 写入目标：get_draw_call_details @ E2629（SP0，仅深度 126274）、E3204（SP1，4MRT+Depth）、E4573（SP2，同一 4MRT+Depth）、E4643（SP4，2MRT+Depth）</li>
+  <li>SP3 光照读取与外部资产：get_pipeline_state @ E4604（PS=132615：GBuffer×3、CSM 2048² D16×2、点光阴影 512² D32、3D LUT 32³、1024² cookie；阴影矩阵 CB 11440B/1312B、灯光 CB 4192B）</li>
+  <li>对照参考：本帧后续独立 RenderPass（Colour Pass #13/#14 DS=Load 复用 126274；E5321/E5330 DS=Clear 新深度）</li>
+  <li>系列前篇：《终末地_大地图_渲染流程分析_20260928.html》（帧总览、Bloom 反汇编、GPU 热点）</li>
+</ul>
+<p class="evid">注：126758/126262 的具体像素格式未在本帧绑定中直接暴露（无后续采样点），依据 MRT 分工推断为 HDR 颜色（R11G11B10 类）与法线/累加目标；SP3 是否使用规范级 subpassLoad 为待验证项（见第 7 节）。其余结论均有事件/管线状态直接证据。</p>
+
+<div class="foot">
+  <p>Vulkan Subpass 应用深度分析 · 2026-09-28 · 工具链：qrenderdoc(官方) + renderdoc MCP · 自包含 HTML（内联 CSS）</p>
+  <p>系列报告：渲染流程总分析 → 本篇（Subpass 专项）· 后续可扩展：CSM 阴影链分析、SP3 延迟光照着色器反汇编</p>
+</div>
+
+</body>
+</html>

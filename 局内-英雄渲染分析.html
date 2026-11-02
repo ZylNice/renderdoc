@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋 · 局内 · 英雄渲染分析</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171e2e; --panel2: #1d2638; --border: #2b3752;
+    --text: #d7deeb; --muted: #8b97ad; --accent: #4da3ff; --green: #43c78a;
+    --orange: #f0a44a; --red: #ef6a6a; --purple: #b07fe8; --cyan: #4ac8d8;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    line-height: 1.75; font-size: 15px; }
+  .container { max-width: 1080px; margin: 0 auto; padding: 40px 28px 80px; }
+  header { border-bottom: 2px solid var(--border); padding-bottom: 24px; margin-bottom: 32px; }
+  header h1 { margin: 0 0 8px; font-size: 26px; color: #fff; }
+  header .sub { color: var(--muted); font-size: 14px; }
+  h2 { font-size: 20px; color: var(--accent); border-left: 4px solid var(--accent);
+    padding-left: 12px; margin: 44px 0 18px; }
+  h3 { font-size: 16px; color: #fff; margin: 24px 0 10px; }
+  code, .mono { font-family: Consolas, "Cascadia Code", monospace; background: #0a0e18;
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px;
+    font-size: 13px; color: #ffd479; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); color: #fff; white-space: nowrap; }
+  td { background: var(--panel); }
+  .pass { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px 22px; margin: 18px 0; }
+  .pass > h3 { margin-top: 0; }
+  .tag { display: inline-block; font-size: 12px; font-weight: 400; padding: 2px 10px;
+    border-radius: 20px; border: 1px solid; white-space: nowrap; }
+  .tag.hero { color: var(--orange); border-color: var(--orange); }
+  .tag.vs { color: var(--purple); border-color: var(--purple); }
+  .tag.ps { color: var(--cyan); border-color: var(--cyan); }
+  .tag.feat { color: var(--green); border-color: var(--green); }
+  .eid { color: var(--muted); font-size: 12.5px; font-weight: 400; }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  .flow { background: #0a0e18; border: 1px solid var(--border); border-radius: 10px;
+    padding: 24px; font-family: Consolas, monospace; font-size: 13px; line-height: 1.9;
+    white-space: pre; overflow-x: auto; color: var(--text); }
+  .note { background: rgba(77,163,255,.08); border-left: 4px solid var(--accent);
+    padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  .small { font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>王者万象棋 · 局内 · 英雄渲染分析</h1>
+  <div class="sub">
+    截帧文件：<code>局内-无泛光.rdc</code> ｜ API：OpenGL ES ｜
+    数据来源：Rendertest MCP（draw 列表 / 管线状态 / SPIR-V 反编译）｜ 2026-09-21
+  </div>
+</header>
+
+<h2>一、英雄 draw 的识别</h2>
+
+<p>本截帧中，英雄棋子是 CSM 阴影图的 caster/receiver 集合中的"大网格"成员（10K 级索引）：</p>
+
+<table>
+  <tr><th>英雄 draw</th><th>索引数</th><th>VS / PS 资源</th><th>角色</th></tr>
+  <tr><td>EID 1382</td><td>10338</td><td><code>66399 / 66400</code></td><td>标准英雄变体（主分析对象）</td></tr>
+  <tr><td>EID 1529</td><td>8370</td><td><code>59947 / 59948</code></td><td>SSS + 实时灯增强变体</td></tr>
+</table>
+
+<div class="note">
+  两套 shader 均为"英雄 shader 家族"的不同变体：同一渲染框架（PBR + CSM + 环境光照），
+  按英雄材质特性裁剪特性。此前「有泛光」截帧中还见过第三种
+  （<code>85239</code>，带 <code>_u_RefEnvTex</code> 镜面反射的变体）。<br>
+  印证：英雄在棋盘上<b>成对绘制</b>（相同索引数连发两次 = 同卡两张棋子），且是 CSM 自阴影体系的 caster 兼 receiver。
+</div>
+
+<h2>二、顶点着色器分析 <span class="tag vs">VS 66399 @ EID 1382</span></h2>
+
+<div class="pass">
+  <h3>结构特征（SPIR-V 反编译还原）</h3>
+  <table>
+    <tr><th>项目</th><th>内容</th><th>说明</th></tr>
+    <tr><td>顶点输入</td><td>POSITION / NORMAL / TANGENT / TEXCOORD0-2</td><td>TEXCOORD2 携带逐顶点附加数据（见下）</td></tr>
+    <tr><td>矩阵</td><td><code>ObjectToWorld</code> / <code>WorldToObject</code> / <code>MatrixVP</code></td><td>标准三矩阵，<b>无骨骼矩阵调色板</b></td></tr>
+    <tr><td>输出</td><td>WS 位置 / 法线 / 切线 / UV / 雾因子</td><td>世界空间 TBN 传给 PS</td></tr>
+  </table>
+  <ul>
+    <li><b>无 GPU 蒙皮</b>：VS 中没有任何骨骼权重采样 —— 棋子动画为 CPU 预蒙皮（每帧重写顶点 buffer）或静态姿态，符合自走棋"低频动画"的省电设计</li>
+    <li><b>固定相机选项</b>：<code>_ug_EnableFixedCamera</code> / <code>_ug_FixedCameraPosition</code> —— 支持锁定观察相机的特殊视角（技能特写等）</li>
+    <li><b>高度雾逐顶点</b>：距离雾 + 高度雾 + 域雾（<code>_ug_YAFogDomain*</code>）在 VS 预计算，PS 只做插值 —— 省像素成本</li>
+    <li><b>TEXCOORD2 通道</b>：
+      <code>.x</code> = 挤压缩放因子（法线按 <code>sqrt(1-x²)</code> 缩放）、<code>.y</code> = 旋转角（sin/cos 在 VS 旋转法线）、<code>.z</code> = ×0.6366 clamp（AO/rim 宽度类数据）、<code>.w</code> = 直接透传 —— 逐顶点控制轮廓/rim 形状的附加属性</li>
+  </ul>
+</div>
+
+<h2>三、像素着色器 · 标准变体 <span class="tag ps">PS 66400 @ EID 1382</span></h2>
+
+<h3>3.1 纹理采样清单（9 张）</h3>
+<table>
+  <tr><th>槽位</th><th>纹理</th><th>规格</th><th>用途</th></tr>
+  <tr><td>0</td><td><code>_us_SpecularOcclusionLutBRDFCone</code></td><td>RGBA8 1024²</td><td>预积分高光遮挡 LUT</td></tr>
+  <tr><td>1</td><td>—</td><td>RGBA8 4×4</td><td>颜色 LUT（退化小图）</td></tr>
+  <tr><td>2</td><td><code>_u_AlbedoMap</code></td><td>RGBA8 512²</td><td>反照率</td></tr>
+  <tr><td>3</td><td><code>_u_MaterialParamsMap</code></td><td>RGBA8 512²</td><td>材质参数（metallic / roughness / mask）</td></tr>
+  <tr><td>4</td><td><code>_ug_EnvmapFilterWithGGX</code></td><td>RGBA8 64² Cube ×6mip</td><td>GGX 预滤波环境贴图</td></tr>
+  <tr><td>6</td><td>CSM 阴影图</td><td>D16 1024²</td><td>方向光阴影（比较采样）</td></tr>
+  <tr><td>7</td><td>SunOcclusion</td><td>RGB8 32×32</td><td>全局太阳遮挡</td></tr>
+  <tr><td>8</td><td>颜色 LUT</td><td>R8 256×16</td><td>分级曲线</td></tr>
+  <tr><td>5/6</td><td><code>_us_DFGTexture</code></td><td>DFG LUT</td><td>split-sum BRDF 积分</td></tr>
+</table>
+
+<h3>3.2 着色流程（反汇编逐步还原）</h3>
+<div class="flow">①  sRGB→Linear（移动端三次多项式近似，非 pow 2.2）:
+    linear = c² × (0.3053c + 0.6822) + 0.0125c        [Albedo / Emissive / SunOcclusion 均用]
+
+②  材质: metallic×MaterialParams remap, roughness = max(r, 0.089)
+    albedo 按金属度做 (1-metal) 漫反射 / 高光 F0 混合
+
+③  法线: NormalMap ×2-1, 与 VS 传来的世界空间 TBN 合成（支持镜像 UV）
+
+④  主光照: _ug_LightDirectionAndAngleOffset（带角度衰减的方向光）
+    + SunOcclusion 贴图（全局太阳遮挡）
+
+⑤  CSM 自阴影:
+    NormalBias 沿法线偏移 → CSM 矩阵投影 → UV 裁剪(|uv|<0.9922)
+    → 4-tap PCF（比较采样，各 1/16 权重）→ DistanceFade 距离淡出
+    → shadow = 1 - strength×(1 - pcf)          ← _u_ShadowStrength 逐材质可调
+
+⑥  漫反射环境光: _ug_IrradianceACCoeffs（Ambient Cube，6 面 6×vec4，
+    按法线分量正负选择 ± 面插值）× EnvmapIntensity
+
+⑦  高光: GGX 预滤波 Cube（按 roughness 选 mip）× DFG split-sum
+    × SpecularOcclusionLutBRDFCone（16×16 分格预积分高光遮挡）
+    × _u_SelfGI（自发光 GI，×(1-shadow)·0.4 项混入）
+
+⑧  直射项: (albedo×0.3183 + SelfGI 贡献) × 光色 × CSM shadow
+    + emissive × EmissiveColor
+    + 反射项 env 高光 + AmbientCube 漫反射
+
+⑨  雾: 距离雾线性混合 FogColor（VS 预计算因子）
+
+⑩  Vignette 暗角（可选）→ 曝光（_ug_ExposureScale, 半值过渡）
+
+⑪  色调映射: c/(c+0.155) × 1.019  ≈ 缩放版 Reinhard
+    → clamp 65504 → 颜色 LUT 前的 (c+0.155)/1.019 处理
+
+⑫  角色底部压暗 <span style="color:#43c78a">（英雄专属）</span>:
+    w = smoothstep((y - Low)/(High - Low))^Power   ← _ug_BottomDarkenHeight{Low,High,Power}
+    color = mix(color, color × BottomDarkenColor, w)
+    （_ug_IsCharacterBottomDarken 开关，仅角色开启 —— 强化棋子与地面的接触感）
+
+⑬  MaskScale 输出遮罩 + 最终 clamp</div>
+
+<h2>四、像素着色器 · SSS 增强变体 <span class="tag ps">PS 59948 @ EID 1529</span></h2>
+
+<div class="pass">
+  <h3>在标准变体之上新增的能力（常量表对比 46 项 vs 39 项）</h3>
+  <table>
+    <tr><th>新增特性</th><th>常量 / 资源</th><th>说明</th></tr>
+    <tr><td><span class="tag feat">次表面散射</span></td><td><code>_u_SSSColor1/2/3</code> + <code>_u_SSSIntensity</code></td><td>预积分 SSS（皮肤/软体材质的透光），三套颜色叠加</td></tr>
+    <tr><td><span class="tag feat">实时局部灯</span></td><td><code>_ug_LightForward/Right/Up/PositionAndFalloff</code> + <code>_ug_LightCookieInfo/CookieST</code></td><td>逐像素点光（带投影 cookie），由 <code>_ug_NumOfRealTimeLightsInTotal</code> 控制启用 —— 用于大招/特效打亮英雄</td></tr>
+    <tr><td><span class="tag feat">渐隐</span></td><td><code>_u_StippleAlpha</code></td><td>半透明抖动渐隐（棋子消散/入场），避免 alpha blend 排序</td></tr>
+    <tr><td><span class="tag feat">阴影微调</span></td><td><code>_u_ShadowScale</code></td><td>独立于 ShadowStrength 的第二阴影缩放</td></tr>
+  </table>
+  <p class="small">此变体给特定英雄（如带皮肤质感的角色）使用；采样清单多一张 1024² 材质图。</p>
+</div>
+
+<h2>五、英雄 Shader 变体家族</h2>
+
+<table>
+  <tr><th>变体</th><th>来源</th><th>独有特性</th></tr>
+  <tr><td>标准型（66400）</td><td>本截帧 EID 1382</td><td>PBR + AmbientCube + BottomDarken + BRDFCone</td></tr>
+  <tr><td>SSS 型（59948）</td><td>本截帧 EID 1529</td><td>+ 次表面散射 + 实时局部灯 + StippleAlpha</td></tr>
+  <tr><td>反射型（85239）</td><td>有泛光截帧 EID 953</td><td>+ <code>_u_RefEnvTex</code> 镜面反射（<code>_u_FakeRefRotationAngle</code> 假反射旋转）+ <code>_u_MatLightDir/Color</code> 逐材质自定义灯 + <code>_u_UseDirShadow</code> 开关</td></tr>
+</table>
+
+<h2>六、移动端优化观察</h2>
+
+<div class="obs">
+  <ul>
+    <li><b>sRGB 解码用三次多项式近似</b>（<code>c²(0.3053c+0.6822)+0.0125c</code>）代替 <code>pow 2.2</code> —— 每纹理采样省 3 次通用函数调用</li>
+    <li><b>环境漫反射用 Ambient Cube</b>（6×vec4）而非 SH —— 常量更少、单次分量选择代替多项式求值</li>
+    <li><b>高光遮挡走 16×16 预积分 LUT</b>（SpecularOcclusionLutBRDFCone）而非解析式 —— 用一次采样替代 Cone/AO 推导</li>
+    <li><b>雾在 VS 计算</b>，PS 仅插值 —— 逐顶点足够（棋子顶点密度高）</li>
+    <li><b>无 GPU 蒙皮</b> —— 动画 CPU 化或静态，降低 shader ALU</li>
+    <li><b>色调映射为缩放 Reinhard 近似</b>（c/(c+0.155)×1.019），无 ACES 级开销</li>
+    <li><b>底部压暗（BottomDarken）替代复杂接触阴影</b> —— 用世界 Y 高度的 smoothstep 幂曲线混合暗色，强化"站在地上"的感觉</li>
+    <li><b>变体按需裁剪</b>：SSS/实时灯/镜面反射作为独立 shader 变体存在，普通英雄不付这些成本</li>
+  </ul>
+</div>
+
+<p class="small">注：截帧在分析期间有切换，EID 与上文引用的 pass 区间均以「局内-无泛光.rdc」的会话数据为准；变体家族对比引用了「局内-有泛光.rdc」的 shader（85239）。</p>
+
+</div>
+</body>
+</html>

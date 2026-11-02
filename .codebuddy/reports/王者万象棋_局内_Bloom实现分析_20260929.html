@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋·局内 — Bloom 实现分析 20260929</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --border:#30363d;
+    --fg:#e6edf3; --fg-dim:#8b949e; --accent:#58a6ff; --good:#3fb950;
+    --warn:#d29922; --violet:#bc8cff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.65;padding:24px;max-width:1400px;margin:0 auto}
+  h1{font-size:24px;border-bottom:2px solid var(--violet);padding-bottom:10px;margin-bottom:6px}
+  h2{font-size:19px;color:var(--accent);margin:30px 0 10px;border-left:4px solid var(--accent);padding-left:10px}
+  h3{font-size:15px;color:var(--violet);margin:16px 0 6px}
+  .meta{color:var(--fg-dim);font-size:13px;margin-bottom:20px}
+  .toc{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 20px;margin:16px 0;font-size:13.5px}
+  .toc a{color:var(--accent);text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  pre{background:#0a0e14;border:1px solid var(--border);border-radius:8px;padding:14px 16px;overflow-x:auto;font-family:Consolas,"Cascadia Mono",monospace;font-size:12px;color:#c9d1d9;margin:10px 0;line-height:1.45}
+  .note{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--warn);border-radius:6px;padding:12px 16px;margin:12px 0;font-size:13.5px}
+  .note.green{border-left-color:var(--good)} .note.blue{border-left-color:var(--accent)} .note.violet{border-left-color:var(--violet)}
+  code{background:#21262d;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12.5px;color:#ffa657}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+  th{background:var(--panel2);color:var(--accent);text-align:left;padding:8px 10px;border:1px solid var(--border)}
+  td{padding:6px 10px;border:1px solid var(--border);vertical-align:top}
+  .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#33254d;color:var(--violet);margin-right:4px}
+  .tagD{background:#1d3a5f;color:var(--accent)} .tagU{background:#274531;color:var(--good)} .tagE{background:#4d2d2d;color:#ff7b72}
+  .foot{margin-top:36px;padding-top:14px;border-top:1px solid var(--border);color:var(--fg-dim);font-size:12px}
+  ul{margin:8px 0 8px 22px} li{margin:3px 0}
+  .kpi{display:flex;gap:14px;flex-wrap:wrap;margin:14px 0}
+  .kpi div{flex:1;min-width:150px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 16px;text-align:center}
+  .kpi b{display:block;font-size:22px;color:var(--accent)}
+  .kpi span{font-size:12px;color:var(--fg-dim)}
+</style>
+</head>
+<body>
+
+<h1>《王者万象棋》局内（有泛光）— Bloom 实现分析</h1>
+<div class="meta">
+  截帧：<code>D:\Renderdoc 截帧\王者万象棋\OpengGL\局内-有泛光.rdc</code> · OpenGL ES (GLES3) · 设备 OnePlus PLK110 / Adreno 840 / Android 16
+  · RenderDoc MCP（官方 renderdoc 实例）· 2026-09-29 · 系列报告同目录（终末地系列 20260928）
+</div>
+
+<div class="toc">
+  <b>目录</b><br>
+  ① <a href="#s1">结论速览（上下采样次数）</a><br>
+  ② <a href="#s2">帧内定位与总体结构</a><br>
+  ③ <a href="#s3">金字塔纹理明细（尺寸 / 资源ID / 输入输出关系）</a><br>
+  ④ <a href="#s4">各阶段 Shader 算法分析（提取 / 降采样 / 上采样 / 合成）</a><br>
+  ⑤ <a href="#s5">GPU 耗时与显存占用</a><br>
+  ⑥ <a href="#s6">与《终末地》Bloom 对比</a><br>
+  ⑦ <a href="#s7">可借鉴的优化点</a><br>
+  ⑧ <a href="#s8">数据来源与取证方法</a>
+</div>
+
+<h2 id="s1">① 结论速览</h2>
+<div class="kpi">
+  <div><b>1 次</b><span>亮部提取（阈值+Karis 预滤波）</span></div>
+  <div><b>8 次</b><span>降采样（逐级 ÷2，至 4×2）</span></div>
+  <div><b>7 次</b><span>上采样（帐篷滤波+同级累加）</span></div>
+  <div><b>1 次</b><span>全分辨率合成（场景+Bloom+自动曝光）</span></div>
+</div>
+<div class="note green">
+  <b>一句话结论：</b>该 Bloom 是典型的 <b>URP 风格"Karis 降采样金字塔 + 帐篷上采样累加"</b> 的碎片着色器实现（Unity 特征：HLSLcc 命名 <code>_uhlslcc_mtx4x4g_ColorMatrix</code>、glslang 编译为 SPIR-V）。
+  全流程共 <b>16 个全屏三角形 pass</b>（对应 RenderDoc 里的 <code>Colour Pass #3 ~ #18</code>，事件 7063–7371，每个 pass 仅 1 次 3 索引绘制），
+  加上 <code>Colour Pass #19</code> 开头的 1 次全屏合成（事件 7388），Bloom 相关 GPU 总耗时约 <b>1.11 ms</b>（Adreno 840 实测计数器）。
+</div>
+
+<h2 id="s2">② 帧内定位与总体结构</h2>
+<p>截帧共 513 个 action / 437 次 draw。Bloom 链完全位于主场景渲染（<code>Colour Pass #2</code>，事件 8569）之后、UI 之前：</p>
+<pre>
+Colour Pass #2   (E8569)  ── 3D 场景渲染，输出场景颜色 80804 (2132×1198 RGBA8)
+Colour Pass #3   (E7063)  ── <b>Bloom 提取</b>：80804 → 80811 (533×599)，软阈值 + Karis 6-tap 预滤波
+Colour Pass #4~11(E7097~7273) ── <b>8 次降采样</b>：533×599 → 533×299 → … → 4×2
+Colour Pass #12~18(E7287~7371) ── <b>7 次上采样</b>：4×2 → … → 533×299（最终 Bloom 纹理 347631）
+Colour Pass #19  (E7388)  ── <b>Bloom 合成</b>：场景 80804 + Bloom 347631 → 17893 (2558×1438，含自动曝光)
+                          └─ 之后 Pass #19/20 继续绘制 UI 与特效
+</pre>
+<div class="note">
+  <b>金字塔"降-升"结构的判据：</b>Pass #3~#11 的输出纹理 ID 单调递增（新分配的降采样链），Pass #12 起输出 ID 倒序回升（8×4 → 16×9 → … → 533×299），
+  且上采样 shader 同时绑定两张纹理（低一级 + 同级降采样结果），是标准的<b>逐级累加上采样</b>（progressive additive upsample）。
+</div>
+<div class="note blue">
+  <b>分辨率注记：</b>场景缓冲 80804 为 2132×1198（16:9 横屏），合成输出 17893 为 2558×1438（≈1.2× 上采样），最终经 8504/8563 两次全屏 blit 走 1440×2560 肖像后缓冲上屏。
+  Bloom 基础分辨率 533×299 = 场景分辨率的 1/4（2132/4=533，1198/4≈299）。提取 pass 一步从 2132×1198 直接到 533×599（水平 ÷4、垂直 ÷2，与 shader 内 3×2 采样脚印 4×2 texel 完全对应）。
+</div>
+
+<h2 id="s3">③ 金字塔纹理明细</h2>
+<table>
+<tr><th>级别</th><th>阶段</th><th>事件</th><th>Pass</th><th>输出纹理</th><th>尺寸</th><th>格式</th><th>读入（输入）</th></tr>
+<tr><td>L0</td><td><span class="tag tagE">提取</span></td><td>E7063</td><td>#3</td><td>80811</td><td>533×599</td><td>RGBA8</td><td>场景 80804 (2132×1198)</td></tr>
+<tr><td>L1</td><td><span class="tag tagD">降采样 1</span></td><td>E7097</td><td>#4</td><td>347632</td><td>533×299</td><td>RGBA8</td><td>80811</td></tr>
+<tr><td>L2</td><td><span class="tag tagD">降采样 2</span></td><td>E7123</td><td>#5</td><td>347635</td><td>266×149</td><td>RGBA8</td><td>347632</td></tr>
+<tr><td>L3</td><td><span class="tag tagD">降采样 3</span></td><td>E7148</td><td>#6</td><td>347638</td><td>133×74</td><td>RGBA8</td><td>347635</td></tr>
+<tr><td>L4</td><td><span class="tag tagD">降采样 4</span></td><td>E7173</td><td>#7</td><td>347641</td><td>66×37</td><td>RGBA8</td><td>347638</td></tr>
+<tr><td>L5</td><td><span class="tag tagD">降采样 5</span></td><td>E7198</td><td>#8</td><td>347644</td><td>33×18</td><td>RGBA8</td><td>347641</td></tr>
+<tr><td>L6</td><td><span class="tag tagD">降采样 6</span></td><td>E7223</td><td>#9</td><td>370905</td><td>16×9</td><td>RGBA8</td><td>347644</td></tr>
+<tr><td>L7</td><td><span class="tag tagD">降采样 7</span></td><td>E7248</td><td>#10</td><td>370908</td><td>8×4</td><td>RGBA8</td><td>370905</td></tr>
+<tr><td>L8</td><td><span class="tag tagD">降采样 8</span></td><td>E7273</td><td>#11</td><td>370911</td><td>4×2</td><td>RGBA8</td><td>370908</td></tr>
+<tr><td>L7'</td><td><span class="tag tagU">上采样 1</span></td><td>E7287</td><td>#12</td><td>370909</td><td>8×4</td><td>RGBA8</td><td>370911 (4×2) + 370908 (8×4)</td></tr>
+<tr><td>L6'</td><td><span class="tag tagU">上采样 2</span></td><td>E7301</td><td>#13</td><td>370906</td><td>16×9</td><td>RGBA8</td><td>370909 + 370905</td></tr>
+<tr><td>L5'</td><td><span class="tag tagU">上采样 3</span></td><td>E7315</td><td>#14</td><td>347643</td><td>33×18</td><td>RGBA8</td><td>370906 + 347644</td></tr>
+<tr><td>L4'</td><td><span class="tag tagU">上采样 4</span></td><td>E7329</td><td>#15</td><td>347640</td><td>66×37</td><td>RGBA8</td><td>347643 + 347641</td></tr>
+<tr><td>L3'</td><td><span class="tag tagU">上采样 5</span></td><td>E7343</td><td>#16</td><td>347637</td><td>133×74</td><td>RGBA8</td><td>347640 + 347638</td></tr>
+<tr><td>L2'</td><td><span class="tag tagU">上采样 6</span></td><td>E7357</td><td>#17</td><td>347634</td><td>266×149</td><td>RGBA8</td><td>347637 + 347635</td></tr>
+<tr><td>L1'</td><td><span class="tag tagU">上采样 7</span></td><td>E7371</td><td>#18</td><td><b>347631</b></td><td>533×299</td><td>RGBA8</td><td>347634 (266×149) + 347632 (533×299)</td></tr>
+<tr><td>—</td><td><span class="tag tagE">合成</span></td><td>E7388</td><td>#19 首</td><td>17893 (+Z 17894)</td><td>2558×1438</td><td>RGBA8</td><td>场景 80804 + Bloom 347631</td></tr>
+</table>
+<div class="note">
+  <b>注意：</b>上采样链止步于 533×299（L1 级），并不回到提取级的 533×599。即最终送入合成的 Bloom 纹理是场景 1/4 分辨率，80811 (533×599) 仅作为降采样起点使用一次。合成 pass 以双线性采样把它放大回全分辨率。
+</div>
+
+<h2 id="s4">④ 各阶段 Shader 算法分析</h2>
+<p>所有 Bloom pass 均为单个全屏三角形（<code>glDrawElements</code> 3 索引），SPIR-V 由 glslang 11 生成（GLES 的 GLSL→SPIR-V 路径），uniform 带 HLSLcc 前缀（<code>_uu_*</code> / <code>_uhlslcc_*</code>），可判定为 Unity URP 定制版 Bloom。</p>
+
+<h3>4.1 亮部提取（PS 57737 @ E7063）</h3>
+<div class="note green">
+  <b>要点：</b>6 tap Karis 加权（3×2 采样脚印，对应 ÷4×÷2 降采样）+ URP 式软阈值（soft-knee），并顺带完成自动曝光、色彩矩阵换算。常量：<code>_u_BloomSrcTex_TexelSize</code>、<code>_u_BloomSrcUvScale</code>、<code>_u_Threshold(vec4)</code>、<code>_u_Params(vec4)</code>、<code>_u_ExposureParams</code>、<code>_u_PostExposure</code>、<code>_ug_ExposureScale</code>、<code>_uhlslcc_mtx4x4g_ColorMatrix</code>。
+</div>
+<pre>// 伪代码（由 SPIR-V 反推）
+const float2 OFFS[6] = {(-2,-1),(0,-1),(2,-1),(-2,1),(0,1),(2,1)};  // ×texelSize×uvScale
+float3 sum = 0; float wsum = 0;
+for (tap in OFFS) {
+    float3 c = tex(_u_BloomSrcTex, uv + tap);          // 6 次显式 ImageSampleExplicitLod
+    float  l = dot(c.rgb, {0.2125, 0.7154, 0.0721});   // Rec.709 亮度
+    float  w = 1.0 / (l + _u_Params.y);                // Karis 权重
+    sum += c * w;  wsum += w;
+}
+float3 col = clamp(sum / wsum, 0, 1);
+col = col / (1.019 - col) * 0.155;                      // filmic 段（结合 alpha 的 mask 计算）
+col *= _u_ExposureParams.xxx;                           // 自动曝光（+ ColorMatrix / PostExposure 分支）
+// ---- URP 标准软阈值 ----
+float br = max(col.r, max(col.g, col.b));
+float soft = clamp(br - _u_Threshold.y, 0, _u_Threshold.z); // knee
+soft = soft * soft * _u_Threshold.w;
+float contribution = max(soft, br - _u_Threshold.x) / max(br, 1e-4);
+o = max(col * contribution, 0);                         // 最终取正值
+</pre>
+
+<h3>4.2 降采样（PS 57730 @ E7097~E7273，8 次复用）</h3>
+<div class="note green">
+  <b>要点：</b>5-tap 加权盒滤波：4 个对角 tap（±1,±1）+ 中心 tap（权重 ×4），每个 tap 同样做 <code>1/(luma + _u_Params.y)</code> 的 Karis 式加权后归一化。GPU 成本随分辨率减半快速衰减。
+</div>
+<pre>const float2 DIAG[4] = {(-1,-1),(1,-1),(-1,1),(1,1)};  // ×texelSize×uvScale
+float3 sum = 0; float wsum = 0;
+for (d in DIAG) { c = tex(src, uv+d); w = 1/(luma(c)+_u_Params.y); sum += c*w; wsum += w; }
+c = tex(src, uv);                    // 中心
+w = 1/(luma(c)+_u_Params.y);
+sum += c * w * 4;  wsum += w * 4;    // 中心权重 ×4
+o = sum / wsum;
+</pre>
+
+<h3>4.3 上采样（PS 57733 @ E7287~E7371，7 次复用）</h3>
+<div class="note green">
+  <b>要点：</b>双输入（binding0 = 低一级纹理做帐篷滤波；binding1 = <code>_u_BloomTex</code> 同级降采样结果直接累加）。8 tap 帐篷核，偏移 ×<code>0.5×_u_SampleScale×texelSize</code>，权重 1/2/2/1 型，总和 ×1/12 —— 即 COD:AW 式 dual-filter 上采样 + 金字塔累加。
+</div>
+<pre>float s = 0.5 * _u_SampleScale * texelSize;            // 缩放后的采样步长
+// 低一级纹理上的 8 个 tap（含权重 ×2 的 3 个）：
+taps = { uv+(-2s,0):1, uv+(-1s,+1s):2, uv+(0,+2s):1, uv+(+2s,0):1,
+         uv+(+1s,0):2, uv+(+1s,-1s):2, uv+(0,-2s):1, uv+(-1s,0)... }  // 权重合计 12
+float3 up = (Σ tap×weight) * 0.0833;                   // = ×1/12
+o = up + tex(_u_BloomTex, uv);                         // 同级降采样结果累加（金字塔融合）
+</pre>
+
+<h3>4.4 合成（PS 60023 + VS 60022 @ E7388）</h3>
+<div class="note green">
+  <b>要点：</b>像素着色器极简（两采样 + MAD），自动曝光在<b>顶点着色器</b>里完成（读 16×16 曝光纹理 15966，uniform <code>_u_AutoExposureEnable/_u_ExposureScale/_u_PostExposure</code>，经 UV1 插值传给 PS）。输出上限 clamp 16（HDR 余量）。
+</div>
+<pre>// PS：_u_BlitTex = 场景 80804（2132×1198），_u_BloomTex = 最终 Bloom 347631（533×299）
+float3 bloom = tex(_u_BloomTex, uv).rgb;
+float3 scene = tex(_u_BlitTex, uv).rgb;
+float3 o = (scene + bloom * _u_Bloom_Params.xxx) * _u_Bloom_Params.yzw; // 强度 + 颜色 tint
+o = o * exposure;                                       // VS 计算的自动曝光（uv1 插值）
+o = min(o, 16.0);                                       // HDR 上限
+// 输出 → 17893 (2558×1438)，同时把场景 2132×1198 放大约 1.2×
+</pre>
+
+<h2 id="s5">⑤ GPU 耗时与显存占用</h2>
+<table>
+<tr><th>事件</th><th>阶段</th><th>输出尺寸</th><th>GPU 耗时 (ms)</th></tr>
+<tr><td>E7063</td><td>提取（2132×1198 → 533×599）</td><td>533×599</td><td>0.2458</td></tr>
+<tr><td>E7097</td><td>降采样 1</td><td>533×299</td><td>0.0737</td></tr>
+<tr><td>E7123</td><td>降采样 2</td><td>266×149</td><td>0.0287</td></tr>
+<tr><td>E7148</td><td>降采样 3</td><td>133×74</td><td>0.0184</td></tr>
+<tr><td>E7173</td><td>降采样 4</td><td>66×37</td><td>0.0164</td></tr>
+<tr><td>E7198</td><td>降采样 5</td><td>33×18</td><td>0.0164</td></tr>
+<tr><td>E7223</td><td>降采样 6</td><td>16×9</td><td>0.0154</td></tr>
+<tr><td>E7248</td><td>降采样 7</td><td>8×4</td><td>0.0143</td></tr>
+<tr><td>E7273</td><td>降采样 8</td><td>4×2</td><td>0.0143</td></tr>
+<tr><td>E7287</td><td>上采样 1</td><td>8×4</td><td>0.0317</td></tr>
+<tr><td>E7301</td><td>上采样 2</td><td>16×9</td><td>0.0154</td></tr>
+<tr><td>E7315</td><td>上采样 3</td><td>33×18</td><td>0.0164</td></tr>
+<tr><td>E7329</td><td>上采样 4</td><td>66×37</td><td>0.0174</td></tr>
+<tr><td>E7343</td><td>上采样 5</td><td>133×74</td><td>0.0205</td></tr>
+<tr><td>E7357</td><td>上采样 6</td><td>266×149</td><td>0.0348</td></tr>
+<tr><td>E7371</td><td>上采样 7</td><td>533×299</td><td>0.0881</td></tr>
+<tr><td>E7388</td><td><b>合成</b>（→2558×1438）</td><td>2558×1438</td><td><b>0.4393</b></td></tr>
+<tr><td colspan="3"><b>合计（17 次绘制）</b></td><td><b>1.1069</b></td></tr>
+</table>
+<ul>
+  <li><b>阶段小计：</b>提取 0.246 ms · 降采样 8 次共 0.198 ms · 上采样 7 次共 0.224 ms · 合成 0.439 ms。</li>
+  <li>最贵的两笔是<b>合成</b>（全分辨率 2558×1438 读写 + 1.2× 放大）与<b>提取</b>（全分辨率场景读取）；金字塔内部 15 个 pass 合计仅 0.42 ms——小分辨率 pass 的固定开销（驱动/tiler dispatch）使 8×4、4×2 级也各要 ~14–16 μs。</li>
+  <li><b>显存：</b>16 张 RGBA8 金字塔纹理合计约 <b>2.84 MB</b>（byte_size 逐张取证求和），移动端可忽略。</li>
+</ul>
+
+<h2 id="s6">⑥ 与《终末地》Bloom 对比</h2>
+<table>
+<tr><th>维度</th><th>王者万象棋（本报告）</th><th>终末地（20260928 报告）</th></tr>
+<tr><td>API / 执行形态</td><td>GLES3 · 片元着色器全屏三角形（glDrawElements×3）</td><td>Vulkan · Compute Shader（共享内存）</td></tr>
+<tr><td>结构</td><td>1 提取 + <b>8 降 + 7 上</b> + 1 合成（17 pass，~1.11 ms）</td><td>1 提取 + 2 次融合 H+V 高斯（9-tap 二项式）+ 金字塔混合 + 合成内叠加</td></tr>
+<tr><td>降采样核</td><td>5-tap Karis 盒（4 对角 + 中心×4）</td><td>9-tap 二项式高斯（共享内存一次 dispatch 融合 H+V）</td></tr>
+<tr><td>上采样核</td><td>8-tap 帐篷（权重 1/2/2/1，×1/12）+ 同级累加</td><td>FMix 强度混合</td></tr>
+<tr><td>提取阈值</td><td>URP 式软阈值（_u_Threshold vec4，knee 曲线）+ Karis</td><td>Karis 软阈值 + NaN/Inf 防护（Bitcast 比对 FLT_MAX）</td></tr>
+<tr><td>曝光</td><td>合成 VS 读 16×16 曝光图，PS 内 min(·,16)</td><td>合成 PS 内一并完成（锐化/LUT/vignette/颗粒）</td></tr>
+<tr><td>中间格式</td><td>RGBA8_UNORM（LDR 链）</td><td>详见终末地报告（HDR 中间链）</td></tr>
+</table>
+
+<h2 id="s7">⑦ 可借鉴的优化点（参照性质）</h2>
+<ul>
+  <li><b>裁剪低价值 mip：</b>16×9 / 8×4 / 4×2 三级对视觉贡献极小（对应弥散半径 &gt; 60% 屏宽的极暗光晕），却占 3 降 + 3 上共 6 个 pass（~0.11 ms 含固定开销）。减到 5 降 4 上即可省 ~0.1–0.15 ms。</li>
+  <li><b>RGBA8 → R11G11B10：</b>整条金字塔为 RGBA8（LDR 量化），合成端却按 HDR 处理（clamp 16）。R11G11B10 无需 alpha 且带宽 −25%，可减轻提取/首降两个最贵金字塔 pass。</li>
+  <li><b>合成 pass 拆分审视：</b>合成既要采样全分辨率场景又要 1.2× 上采样写出 2558×1438（0.44 ms），把 Bloom 叠加合并进随后的放大 blit 或直接在 2132×1198 原生分辨率完成叠加，可省一次全分辨率写。</li>
+  <li><b>阈值合并：</b>提取 pass 已含曝光/色彩矩阵等多个分支；若阈值参数运行时不变，可把 soft-knee 常量化减少 ALU。</li>
+  <li>相比终末地的 CS 共享内存方案，GLES 全屏三角形方案每 pass 固定开销更高（~14 μs 地板），在 pass 数多时 CS 合批（如一次 CS 完成 2~3 级降采样）收益明显。</li>
+</ul>
+
+<h2 id="s8">⑧ 数据来源与取证方法</h2>
+<ul>
+  <li>截帧加载状态与帧统计：<code>get_capture_status</code> / <code>get_frame_summary</code>（513 actions，22 顶层 marker）。</li>
+  <li>事件树与 pass 定位：<code>get_draw_calls</code>（Colour Pass #3~#18 各含 1 次 3 索引绘制，是识别 Bloom 链的直接线索）。</li>
+  <li>输入/输出纹理关系：<code>get_draw_call_details</code>（16 张输出纹理 ID）+ <code>get_pipeline_state</code>（E7063/7097/7123/7287/7371/7388 的像素着色器绑定，含 <code>_u_BloomSrcTex/_u_BloomTex/_u_BlitTex/_u_Threshold/_u_Bloom_Params</code> 等 uniform 名）。</li>
+  <li>纹理尺寸/格式/字节：<code>get_texture_info</code>（80804/80811/347631~347644/370905~370911/370906/370909/17893）。</li>
+  <li>算法取证：<code>get_shader_source</code>（PS 57737 / 57730 / 57733 / 60023 的 SPIR-V 全文，glslang 11 生成；本文伪代码由其反推）。</li>
+  <li>耗时：<code>get_action_timings</code>（Adreno 840 GPU 计数器，17 个事件逐条）。</li>
+  <li>注：常量缓冲具体数值读取失败（MCP 端 <code>GetConstantBuffer</code> 属性缺失），阈值具体标量未取证；<code>find_draws_by_resource</code> 在 OpenGL 截帧下返回全量匹配（工具 bug），已改用逐事件管线状态确认。</li>
+</ul>
+
+<div class="foot">
+  王者万象棋（外部参照游戏，包名 com.tencent.tmgp.osgame）Bloom 实现分析 · 2026-09-29 · RenderDoc MCP 官方实例 ·
+  同目录系列：<a href="终末地_大地图_Bloom反汇编全集_20260928.html" style="color:var(--accent)">终末地·大地图 Bloom 反汇编全集</a> ·
+  <a href="终末地_大地图_渲染流程分析_20260928.html" style="color:var(--accent)">终末地·大地图渲染流程分析</a> ·
+  本报告结论仅基于该单帧取证，帧间参数（阈值/强度/曝光）可能动态变化。
+</div>
+
+</body>
+</html>

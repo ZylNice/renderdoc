@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>局内方向阴影（CSM）分析 — 是否可以关闭</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#182035; --panel2:#1e2a45; --line:#2c3a5e;
+    --text:#dbe4f5; --dim:#8fa1c4; --accent:#4da3ff; --green:#3ddc97;
+    --yellow:#ffd166; --red:#ff6b6b; --mono:Consolas,"Courier New",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:"Microsoft YaHei","PingFang SC",sans-serif;line-height:1.75;padding:32px}
+  .wrap{max-width:1080px;margin:0 auto}
+  h1{font-size:26px;border-left:5px solid var(--accent);padding-left:14px;margin-bottom:4px}
+  .sub{color:var(--dim);font-size:13px;margin-bottom:28px}
+  h2{font-size:19px;color:var(--accent);margin:36px 0 12px;border-bottom:1px solid var(--line);padding-bottom:8px}
+  h3{font-size:15px;color:var(--yellow);margin:22px 0 8px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 22px;margin:14px 0}
+  .conclusion{background:linear-gradient(135deg,#1c2b4d,#16233c);border:1px solid #35507e;
+              border-radius:10px;padding:20px 24px;margin:18px 0}
+  .conclusion .verdict{font-size:17px;font-weight:700;color:var(--yellow)}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#bcd0f2}
+  td.k{color:var(--dim);white-space:nowrap}
+  code,.mono{font-family:var(--mono);background:#0b101c;border:1px solid var(--line);
+             border-radius:4px;padding:1px 6px;font-size:12.5px;color:#9fd0ff}
+  pre{background:#0b101c;border:1px solid var(--line);border-radius:8px;padding:14px 16px;
+      overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;color:#b8c8e8}
+  .tag{display:inline-block;border-radius:4px;padding:1px 8px;font-size:12px;font-weight:600;margin-right:4px}
+  .tag.g{background:rgba(61,220,151,.15);color:var(--green);border:1px solid rgba(61,220,151,.4)}
+  .tag.y{background:rgba(255,209,102,.12);color:var(--yellow);border:1px solid rgba(255,209,102,.4)}
+  .tag.r{background:rgba(255,107,107,.12);color:var(--red);border:1px solid rgba(255,107,107,.4)}
+  .good{color:var(--green)} .warn{color:var(--yellow)} .bad{color:var(--red)}
+  ul{margin:8px 0;padding-left:22px} li{margin:4px 0}
+  .flow{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
+  .flow .step{flex:1;min-width:200px;background:var(--panel2);border:1px solid var(--line);
+              border-radius:8px;padding:12px 14px;font-size:13px}
+  .flow .step b{color:var(--accent);display:block;margin-bottom:4px}
+  .note{border-left:4px solid var(--yellow);background:rgba(255,209,102,.06);
+        padding:10px 16px;border-radius:0 8px 8px 0;margin:12px 0;font-size:13.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>局内方向阴影（CSM）分析</h1>
+<div class="sub">截帧：局内-有泛光.rdc（OpenGL） · 王者万象棋 · 基于 RenderDoc 抓帧逐事件分析 · 2026-09-21</div>
+
+<div class="conclusion">
+  <div class="verdict">结论：方向阴影（CSM）在局内<b>只服务于场景/地图静态物件</b>，英雄用的是另一套 blob 投影阴影。
+  CSM 阴影图为<b>隔帧/按需更新</b>（10 draw 深度渲染 + 每帧 7 个 draw 的 4-tap PCF 采样），摊薄成本很低。
+  因此<b>关掉它省不了多少性能，但会丢场景投影观感</b>；真要省，必须用 shader keyword 剥离变体——
+  现有的 <code>_u_UseDirShadow</code> 开关是 uniform Select，<b>关了也照样采样，不省钱</b>。</div>
+</div>
+
+<h2>一、局内其实有两套互不相干的阴影系统</h2>
+<div class="flow">
+  <div class="step">
+    <b>① 英雄 blob 投影阴影（每帧都渲染）</b>
+    遮罩 pass（20~34 个 draw）：把英雄剪影以恒定强度
+    <code>_ug_HeroShadowIntensity</code> 渲进 512×512 R8 纹理，<b>无深度附件</b>；
+    再经全屏 4-tap 加权模糊生成最终 <code>HeroShadowTex</code>，
+    由 HeroShadowProjector shader（如 EID 2447）按投影矩阵贴回地面。
+  </div>
+  <div class="step">
+    <b>② 方向光 CSM 阴影（隔帧/按需更新）</b>
+    <code>Depth-only Pass</code>：10 个 draw 把<b>场景网格</b>（不含英雄）以
+    DepthBias + ShadowPancaking caster shader 渲进 1024×1024 <code>D16</code> 深度图
+    <code>Texture 296207</code>。有泛光帧整帧无此 pass、无泛光帧完整出现 → <b>并非每帧渲染</b>。
+  </div>
+</div>
+
+<h2>二、证据链</h2>
+
+<h3>1. CSM 阴影图隔帧渲染（两张抓帧交叉验证）</h3>
+<div class="card">
+<table>
+  <tr><th>抓帧</th><th>CSM 渲染 pass</th><th>CSM 采样</th></tr>
+  <tr><td class="k">局内-有泛光.rdc</td><td class="good">整帧无（437 draw 中 0 处写入 296207）</td><td class="warn">7 个场景 draw（EID 318/953/986/1010/1047/1070/1101）</td></tr>
+  <tr><td class="k">局内-无泛光.rdc</td><td class="warn">Depth-only Pass #1（EID 307–443，10 draw，约 7.5 万索引）</td><td>主 pass 场景 draw 采样</td></tr>
+</table>
+无泛光帧的 CSM pass 顶点 shader 带 <code>_ug_DepthBias</code> / <code>_ug_ShadowPancaking</code> /
+<code>_ug_OrthoCamera</code> / <code>_ug_ShadowNearClipPlane</code>，像素 shader 为空——标准 shadowmap caster；
+投射物全部为场景网格（228/10338/798/3294/20706/8370/24594 索引），<b>英雄不参与 CSM 投射</b>。
+两张帧一有：CSM 为<b>隔帧或按需更新</b>，摊薄后每帧约 5 draw。
+</div>
+
+<h3>2. 采样方：只有场景地图 shader 用 CSM</h3>
+<div class="card">
+以 EID 1101（23982 索引的地图大块）为例，PS 绑定 8 张纹理，其中 slot 6 即 CSM：
+<table>
+  <tr><th>绑定</th><th>资源</th><th>格式 / 尺寸</th><th>用途</th></tr>
+  <tr><td class="k">Binding 6 <code>_ug_CSMShadowTexture</code>（+ zcmp 比较采样器）</td><td>Texture 296207</td><td class="mono">D16 1024×1024</td><td>方向光阴影图（硬件 PCF 比较采样）</td></tr>
+  <tr><td class="k">Binding 5 <code>_ug_SunOcclusion</code></td><td>Texture 73209</td><td class="mono">RGBA8 256×128</td><td>太阳遮挡（另一套烘焙式遮挡，非阴影图）</td></tr>
+</table>
+配套常量：<code>g_CSMShadowMatrices[8]</code>、<code>_ug_CSMShadowTexture_TexelSize</code>、
+<code>_ug_CSMUvScaleOffset</code>、<code>_ug_CSMNormalBias</code>、<code>_ug_CSMDistanceFade</code>、
+<code>_u_UseDirShadow</code>。
+</div>
+
+<h3>3. 像素 shader 中的 CSM 采样逻辑（SPIR-V 反汇编还原）</h3>
+<pre>// 法线偏移后用 CSM 矩阵投影世界坐标
+shadowPos = g_CSMShadowMatrices * (worldPos + normal * normalBias);
+fade = clamp(shadowPos.z * CSMDistanceFade.x + CSMDistanceFade.y, 0, 1);
+if (fade &lt; 1.0) {                        // 距离淡出：远于阴影距离直接跳过
+    ndc = shadowPos.xyz / shadowPos.w;
+    if (abs(ndc.xy) &lt; 0.9922) {          // 阴影图包围盒内才采样
+        // 双线性权重 4-tap 硬件 PCF（ImageSampleDrefExplicitLod × 4）
+        s = w0*texCmp(uv0,d) + w1*texCmp(uv1,d) + w2*texCmp(uv2,d) + w3*texCmp(uv3,d);
+        shadow = s * 0.0625;              // 权重归一
+        shadow = fade*(1-shadow) + shadow;
+    } else shadow = 1.0;
+} else shadow = 1.0;
+
+shadow = (_u_UseDirShadow != 0) ? shadow : 1.0;   // ← 注意：Select，不是分支！
+directLight *= shadow;</pre>
+<div class="note">
+<b>关键点：</b>最终结果用 <code>Select</code> 赋值而非 <code>if</code> 包住整段采样——
+即使运行把 <code>_u_UseDirShadow</code> 置 0，上面 4 次 PCF 比较采样<b>照样执行</b>，结果只是被丢弃。
+也就是说这个开关<b>不能省 GPU 采样开销</b>，只能改画面。
+</div>
+
+<h3>4. 英雄 shader 完全不依赖 CSM</h3>
+<div class="card">
+英雄材质（如 EID 529，8982 索引）的 PS 只绑定 MainTex + 2 张参数图，常量只有
+<code>_ug_HeroLightDirection</code> / <code>_ug_HeroLightIrradiance</code>，<b>无任何阴影图采样</b>。
+英雄的地面影子来自 blob 投影（EID 2447：<code>lerp(HeroShadowColor, 1, tex.x)</code>）。
+</div>
+
+<h2>三、方向阴影的开销账本（本帧实测）</h2>
+<table>
+  <tr><th>成本项</th><th>数值</th><th>频率</th></tr>
+  <tr><td class="k">CSM 渲染 pass</td><td class="warn">10 draw / 约 7.5 万索引（仅场景网格，空 PS）</td><td>隔帧/按需更新，摊薄 ≈ 5 draw/帧</td></tr>
+  <tr><td class="k">CSM 采样</td><td class="warn">7 个场景 draw，每个 4-tap 硬件 PCF</td><td>每帧</td></tr>
+  <tr><td class="k">阴影图显存</td><td>1024×1024 D16 ≈ 2 MB</td><td>常驻</td></tr>
+  <tr><td class="k">对比：blob 阴影生成 + 模糊</td><td>20~34 draw 渲 512² R8 遮罩 + 2 个全屏模糊 draw</td><td class="bad">每帧都跑</td></tr>
+</table>
+<p>CSM 渲染虽然存在，但隔帧更新摊薄后成本仍低于每帧都跑的 blob 阴影链（遮罩 + 模糊 + 投影）。</p>
+
+<h2>四、能不能不要？分三个层面回答</h2>
+
+<h3>Q1. 为什么局内还开着方向阴影？</h3>
+<ul>
+  <li>它负责<b>场景静态物件（建筑、装饰物、地形起伏）投向地图地面的长阴影</b>，是局内地面层次感和光源方向感的主要来源；</li>
+  <li>blob 阴影只能给英雄脚下一个圆形软影，<b>无法替代</b>场景投影；</li>
+  <li>引擎侧已做了隔帧/按需更新 + 距离淡出 + 包围盒剔除，说明项目已经优化过这块。</li>
+</ul>
+
+<h3>Q2. 直接关掉（QualitySettings / <code>_u_UseDirShadow=0</code>）会怎样？</h3>
+<table>
+  <tr><th></th><th>画面</th><th>性能</th></tr>
+  <tr><td class="k">运行时置 0</td>
+      <td class="bad">场景静态投影消失，地面变「平」，只剩英雄脚下圆影</td>
+      <td class="bad">几乎无收益：Select 语义下 7 个 draw 的 4-tap PCF 仍执行；只省阴影图更新（本来就是低频）和 2MB 显存</td></tr>
+  <tr><td class="k">shader keyword 剥离（如 <code>NO_DIR_SHADOW</code> 变体）</td>
+      <td class="bad">同上</td>
+      <td class="good">真正省掉 7 个 draw 的采样 + 矩阵/bias 计算；建议在低端机型画质档使用</td></tr>
+</table>
+
+<h3>Q3. 建议</h3>
+<ul>
+  <li><span class="tag g">保留</span>中高端档：CSM 已是缓存形态，每帧成本极低，视觉收益明确，不建议砍。</li>
+  <li><span class="tag y">低端档可选关闭</span>：务必走 <b>shader keyword / 变体剥离</b> 而不是 <code>_u_UseDirShadow</code> 开关，否则白关。</li>
+  <li><span class="tag y">顺带修正</span>：<code>_u_UseDirShadow</code> 的 Select 写法建议改为 uniform 分支包裹采样段，或直接用 keyword，避免「关了还采样」的隐性浪费。</li>
+  <li><span class="tag y">更值得优化的是 blob 阴影</span>：20 个 draw 每帧渲 512×512 遮罩，可评估合并批次或降低更新频率（英雄不动时跳帧更新）。</li>
+</ul>
+
+<h2>附：相关事件速查</h2>
+<table>
+  <tr><th>EID</th><th>内容</th></tr>
+  <tr><td class="mono">82–212（有泛光帧）</td><td>Colour Pass #1：blob 阴影遮罩生成（20 draw → 512² R8）</td></tr>
+  <tr><td class="mono">307–443（无泛光帧）</td><td>Depth-only Pass #1：CSM caster 渲染（10 draw → D16 深度图，DepthBias + Pancaking，PS 为空）</td></tr>
+  <tr><td class="mono">449–674 / 691 / 7105（无泛光帧）</td><td>blob 遮罩生成（34 draw，无深度附件）→ 全屏 4-tap 模糊 → 最终 HeroShadowTex</td></tr>
+  <tr><td class="mono">318 / 953 / 986 / 1010 / 1047 / 1070 / 1101</td><td>主 pass 中采样 CSM（Texture 296207）的 7 个场景 draw</td></tr>
+  <tr><td class="mono">2447</td><td>HeroShadowProjector：把 blob 阴影贴回地面（294 索引，98 三角形）</td></tr>
+  <tr><td class="mono">Texture 296207</td><td>CSM 阴影图，D16 1024×1024，本帧仅被采样、未被渲染</td></tr>
+</table>
+
+</div>
+</body>
+</html>

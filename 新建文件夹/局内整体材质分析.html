@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋 局内（有泛光）· 整体材质完整分析</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#1b3a2a,#2a1b4a);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#a8d8b9;font-size:14px}
+  main{max-width:1150px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #3ad0a0;padding-left:12px;margin:40px 0 16px;color:#c9f5e4}
+  h3{font-size:16px;color:#7fe6c0;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:#14241f;color:#7fe6c0;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#7fe6c0;font-size:12.5px}
+  pre{background:#0a0f1a;border:1px solid #26324c;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55;color:#c9d6ee}
+  .note{background:#14231d;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .ok{background:#14301f;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .warn{background:#331a1a;border-left:3px solid #e05a5a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#f0c8c8;margin:12px 0}
+  .formula{background:#0f1a15;border:1px dashed #2e7a5a;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:12.5px;color:#b8f0d8;white-space:pre-wrap}
+  .tag{display:inline-block;background:#1d3a2e;border:1px solid #3ad0a0;border-radius:4px;padding:0 8px;font-size:12px;color:#7fe6c0;margin-right:4px}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>局内（有泛光）整体材质完整分析</h1>
+  <div class="sub">
+    截帧：<code>D:\Renderdoc 截帧\王者万象棋\OpengGL\局内-有泛光.rdc</code>（OpenGL ES）｜ 513 actions / 437 draws / 481 纹理 / 400 缓冲 ｜
+    分析方式：RenderDoc MCP 全帧 draw 枚举 + 逐族管线状态采样
+  </div>
+</header>
+<main>
+
+<h2>0. 帧结构总览</h2>
+<table>
+  <tr><th>Pass</th><th>子事件</th><th>内容</th></tr>
+  <tr><td>Colour Pass #1</td><td>20</td><td>前段准备（小 RT/预渲染）</td></tr>
+  <tr><td><b>Colour Pass #2（+Depth）</b></td><td><b>317</b></td><td><b>主场景 pass：棋盘地面 → 8 组英雄（各×2 连发）→ 技能特效 → 粒子 → 血条/UI 底</b>（EID ~3–7000）</td></tr>
+  <tr><td><b>Colour Pass #3–#18</b></td><td>3 × 16</td><td><b>泛光（Bloom）链</b>：17 个 3 索引全屏三角形 draw（EID 7063–7388）= 阈值提取 + 多级降采样 + 上采样混合</td></tr>
+  <tr><td>Colour Pass #19（+Depth）</td><td>49</td><td>第二渲染组（含英雄体量 draw 8 个：EID 8349–8522）</td></tr>
+  <tr><td>Depth-only Pass #1</td><td>11</td><td>深度预 pass</td></tr>
+  <tr><td>Colour Pass #20</td><td>22</td><td>收尾/UI</td></tr>
+</table>
+<div class="note">主 pass 内英雄体量 draw（7500–9000 索引）全部<b>成对连发</b>（如 618/634 都是 8967 索引）——同一英雄画两遍：本体 + 描边/阴影壳。Pass #19 再画一遍 8 英雄，推测为第二相机（结算/展示视角或回放 RT）。</div>
+
+<h2>1. 材质全家福</h2>
+<table>
+  <tr><th>家族</th><th>Shader (VS/PS)</th><th>代表 draw</th><th>纹理</th><th>特征</th></tr>
+  <tr><td><span class="tag">英雄</span></td><td>75310 / 75311</td><td>618（8967 索引）等 8 组×2 + Pass#19 8 个</td><td>3×256²</td><td>Matcap 卡通 PBR + 亮度雾 + Filmic tonemap，alpha=PlayerId（与局外 64775/64777 同架构）</td></tr>
+  <tr><td><span class="tag">棋盘地面</span></td><td>76520 / 76521</td><td>1804（27942 索引）</td><td>2×1024² + 4×4</td><td>GameState 状态变色 + 暗角(Vignette) + 模糊反射开关 + 双 UV</td></tr>
+  <tr><td><span class="tag">地面/旗帜波动</span></td><td>80666 / 80667</td><td>1716（21915 索引）</td><td>2×1024² + 4×4</td><td>棋盘同族 PS + <b>VS 顶点波动画</b>（RippleFreq/Strength/Direction）</td></tr>
+  <tr><td><span class="tag">特效 F1</span> 溶解扭曲族</td><td>74064 / 74065</td><td>3436（2484 索引）</td><td>4 张（Mask 128² + 主图 + 256×128 + 32×128 ramp）</td><td>4 组 UV 滚动 + 扭曲 + 溶解 + 遮罩分工（与局外 E2 同款）</td></tr>
+  <tr><td><span class="tag">特效 F2</span> 法线扭曲+Matcap</td><td>74621 / 74622</td><td>4403（7008 索引）</td><td>6 slot（NormalTex + 512² Matcap + 主图等）</td><td><b>技能范围圈/地面技</b>：法线贴图扭曲 + Matcap 高光 + 边缘收缩</td></tr>
+  <tr><td><span class="tag">特效 F3</span> 扭曲+叠加层</td><td>73297 / 73298</td><td>5946/5950/6060/6128/6422/6468（1476 索引×6）</td><td>4 张（Mask 64² + 256² + 128²×2）</td><td>Main/Mask/Dist/<b>Add 四路 UV</b>，DistortionByMainColor，叠加增亮层</td></tr>
+  <tr><td><span class="tag">泛光</span></td><td>57736 / 57737 等</td><td>7063–7388（17 个全屏三角形）</td><td>BloomSrcTex 2132×1198 全分辨率</td><td>阈值提取(Threshold) + 曝光(PostExposure) + ColorMatrix 调色</td></tr>
+  <tr><td><span class="tag">UI/血条</span></td><td>多种</td><td>大量 6–396 索引 BaseVertex 小 draw</td><td>单图</td><td>主 pass 尾部与 Pass #19/#20，批渲染</td></tr>
+</table>
+
+<h2>2. 英雄材质（75310/75311）摘要</h2>
+<div class="formula">与局外英雄 shader（64775/64777）<b>常量表逐项一致</b>（VS 23 项 / PS 22 项），同一架构：
+Albedo(MainTex.rgb × BaseColor, sRGB 多项式解码)
+ → LightTex 解包：x=粗糙度 / y=金属度 / z=AO+Fresnel 遮罩 / w=Glow 遮罩
+ → Matcap 环境高光（HeroMatCup，LOD=粗糙度×6，a=高光 ramp）
+ → 直接光（T1.w × HeroLightIrradiance × ramp）→ Fresnel（UseFullFresnel 取反）→ Glow
+ → VS 两路加色（T3 Rim/Hurt、T4 ×MulColor 受击染色）
+ → 亮度雾（luma 向 HeroFogColor 靠拢 + 保饱和修正，因子 vs_TEXCOORD7 来自 VS HeroFogParam）
+ → 曝光(ExposureScale+1)×ExposureColor → HDR 压半 → Filmic tonemap(0.533/0.151/0.526/0.2/0.027)
+ → 输出 alpha = _u_PlayerId（供描边 pass 识别）</div>
+<div class="ok">本帧英雄纹理实例：MainTex <code>77150</code>（256²/9mips）+ LightTex <code>379746</code> + MatCup <code>379745</code>。VS $Globals 含 _u_RimColor/_u_HurtColor/_u_RimLightDirWS/_ug_HeroEnableFixedCamera/_ug_HeroFixedCameraPosition（局内战镜固定相机支持）。</div>
+
+<h2>3. 棋盘与地面材质（76520/76521、80666/80667）</h2>
+<div class="formula">PS 16 常量（两 draw 共用同一套）：
+_u_GameState（游戏状态：备战/战斗）+ _u_StateChangeValue/_u_ChangeValue/_u_IsSmoothChange（状态渐变）
+_u_CutOffValue/_u_IsAlphaTest（镂空裁剪）
+_u_Vignette_Params1/2（棋盘边缘暗角，聚焦视觉中心）
+_ug_EnableBlurReflection（模糊反射开关，配合反射 RT）
+_u_Use2UV/_u_MainTexUse2UV/_u_LightenTexUse2UV（第二套 UV：提亮层/细节层）
+纹理：1024² 主图 + 1024² 提亮/细节图 + 4×4 查找表</div>
+<div class="note">80666 变体额外带 <b>VS 顶点波动画</b>：_u_Direction/_u_Length/_u_RippleFreq/_u_Strength/_u_OffsetRadio——旗帜/帷幔/水面类场景道具（21915 索引）。调波动：Edit VS 把 _u_Strength 替换常量 0 可冻结动画排查穿模。</div>
+
+<h2>4. 特效材质摘要</h2>
+<h3>F1 溶解扭曲族（74064/74065）· EID 3436</h3>
+<div class="formula">纹理 4 张：MaskTex(128²) + 主图(128²) + 扭曲图(256×128) + 32×128 ramp
+VS：Main/Mask/Dist/Diss 4 组 UV 滚动 + ZOffset
+PS 16 常量：CurBlendMode / Distortion_MainTex_Strength / DissFea+DissInt+DissolveChannel /
+  Mask_Color·Mask_Alpha·Mask_Distortion·Mask_Dissolve 遮罩分工 / MainAlpha·MultiplyAlpha</div>
+<h3>F2 法线扭曲+Matcap 技能特效（74621/74622）· EID 4403（7008 索引）</h3>
+<div class="formula">纹理 6 slot：_u_NormalTex(128²) + 512² Matcap + 主图 128² + 遮罩 + 4×4
+PS 26 常量 = F1 全家桶基础上新增：
+  _u_IsUseNormalTex/_u_IsNormalDistortion/_u_NormalDistortIntensity/_u_NormalTexIntensity（法线扭曲）
+  _u_MatCapTexBlendMode/_u_MatcapColor/_u_MatcapTex_ST（Matcap 上色）
+  _u_EdgeShrinkRange（边缘收缩范围——技能圈消散）
+典型用途：地面技能范围圈/预警圈</div>
+<h3>F3 扭曲+叠加层（73297/73298）· EID 5946 六连发（1476 索引）</h3>
+<div class="formula">纹理 4 张：Mask(64²) + 主图(256²) + 扭曲(128²) + Add 叠加图(128²)
+VS：Main/Mask/Dist/Add 四路 UV 滚动（Diss 位换成 Add）
+PS 15 常量：Distortion_MainTex / Distortion_AddTex / DistortionByMainColor（扭曲量受主图颜色驱动）
+  / Mask_AddTex / 常规 Mask 分工 + alpha 链
+典型用途：Buff 光环/受击叠加层（六连发=多目标同名 Buff）</div>
+
+<h2>5. 泛光（Bloom）后处理链</h2>
+<div class="formula">17 个全屏三角形 draw（EID 7063–7388，各 3 索引），分布在 Colour Pass #3–#18：
+首 pass（7063，PS 57737）：
+  输入 _u_BloomSrcTex = 2132×1198 全分辨率场景 RT（ResourceId 80804）
+  常量：_u_Threshold（亮度阈值提取）+ _u_Params + _u_PostExposure（后曝光）
+       + _u_ExposureParams + _ug_ExposureScale + g_ColorMatrix（调色矩阵）
+后续 pass：逐级降采样模糊 → 逐级上采样累加 → 最后合成回主 RT</div>
+<h2>6. 统计结论</h2>
+<div class="formula">1) 英雄 draw：主 pass 内 8 组成对连发（本体+描边壳），Pass #19 另有 8 个（第二相机）
+2) 主 pass 317 子事件中粒子小 draw（6–396 索引）占比过半，技能连发区为 Overdraw 主要来源
+   （F3 六连发 1476 索引、F2 7008 索引大面片）
+3) 泛光链 17 个全屏三角形 draw（EID 7063–7388），阈值提取自 2132×1198 全分辨率场景 RT
+4) 棋盘双 shader（76521/80667）共用 PS 逻辑与常量布局，纹理均为 1024²×2 + 4×4 LUT</div>
+
+</main>
+<footer>由 RenderDoc MCP（renderdoc）截帧分析生成 ｜ 局内-有泛光.rdc ｜ 513 actions / 437 draws ｜ 英雄 75310/75311 ｜ 棋盘 76520/76521 · 80666/80667 ｜ 特效 74064/74065 · 74621/74622 · 73297/73298 ｜ 泛光 57736/57737</footer>
+</body>
+</html>

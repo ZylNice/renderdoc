@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UI 渲染实现与字体图集分析 · 王者万象棋局内截帧（无泛光）</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --border:#30363d;
+    --fg:#e6edf3; --fg-dim:#9aa4b2; --fg-faint:#6e7887;
+    --accent:#4cc2ff; --accent2:#7ee787; --warn:#f0b72f; --danger:#ff7b72;
+    --mono:#1b2129;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); color:var(--fg); font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; line-height:1.7; font-size:15px;}
+  .wrap{max-width:1080px; margin:0 auto; padding:32px 24px 48px;}
+  header{border-bottom:1px solid var(--border); padding-bottom:20px; margin-bottom:28px;}
+  h1{font-size:26px; font-weight:650; letter-spacing:.5px;}
+  .subtitle{color:var(--fg-dim); margin-top:6px; font-size:14px;}
+  .meta{display:flex; flex-wrap:wrap; gap:8px; margin-top:14px;}
+  .chip{background:var(--panel2); border:1px solid var(--border); border-radius:999px; padding:2px 12px; font-size:12.5px; color:var(--fg-dim);}
+  .chip b{color:var(--fg); font-weight:600;}
+  h2{font-size:19px; margin:38px 0 14px; padding-left:10px; border-left:3px solid var(--accent);}
+  h3{font-size:16px; margin:22px 0 10px; color:var(--accent2);}
+  p{margin:8px 0;}
+  .panel{background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px 18px; margin:12px 0;}
+  .kpis{display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin:16px 0;}
+  .kpi{background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px 16px;}
+  .kpi .v{font-size:22px; font-weight:700; color:var(--accent);}
+  .kpi .v.green{color:var(--accent2);} .kpi .v.warn{color:var(--warn);} .kpi .v.red{color:var(--danger);}
+  .kpi .l{font-size:12.5px; color:var(--fg-dim); margin-top:2px;}
+  code{background:var(--mono); border:1px solid var(--border); border-radius:5px; padding:1px 6px; font-family:Consolas,"JetBrains Mono",monospace; font-size:13px; color:#79c0ff;}
+  pre{background:var(--mono); border:1px solid var(--border); border-radius:8px; padding:14px 16px; overflow-x:auto; font-family:Consolas,"JetBrains Mono",monospace; font-size:12.5px; line-height:1.55; color:#c9d1d9; margin:10px 0;}
+  pre .c{color:#8b949e;} pre .k{color:#ff7b72;} pre .s{color:#a5d6ff;} pre .f{color:#d2a8ff;} pre .n{color:#79c0ff;}
+  table{width:100%; border-collapse:collapse; margin:12px 0; font-size:13.5px;}
+  th{background:var(--panel2); text-align:left; padding:7px 10px; border:1px solid var(--border); color:var(--fg-dim); font-weight:600; white-space:nowrap;}
+  td{padding:6px 10px; border:1px solid var(--border);}
+  tr:nth-child(even) td{background:rgba(255,255,255,.018);}
+  .num{text-align:right; font-variant-numeric:tabular-nums; font-family:Consolas,monospace;}
+  .tag{display:inline-block; font-size:11.5px; border-radius:4px; padding:0 7px; line-height:1.8; margin-right:4px;}
+  .tag-ok{background:rgba(126,231,135,.12); color:var(--accent2); border:1px solid rgba(126,231,135,.35);}
+  .tag-warn{background:rgba(240,183,47,.12); color:var(--warn); border:1px solid rgba(240,183,47,.35);}
+  .tag-red{background:rgba(255,123,114,.12); color:var(--danger); border:1px solid rgba(255,123,114,.35);}
+  .tag-info{background:rgba(76,194,255,.12); color:var(--accent); border:1px solid rgba(76,194,255,.35);}
+  ul,ol{margin:8px 0 8px 24px;}
+  li{margin:4px 0;}
+  .callout{border-left:3px solid var(--warn); background:rgba(240,183,47,.06); padding:12px 16px; border-radius:0 8px 8px 0; margin:14px 0;}
+  .callout.blue{border-left-color:var(--accent); background:rgba(76,194,255,.06);}
+  .callout.green{border-left-color:var(--accent2); background:rgba(126,231,135,.06);}
+  .src{font-size:12.5px; color:var(--fg-faint); border-top:1px dashed var(--border); margin-top:14px; padding-top:10px;}
+  footer{border-top:1px solid var(--border); margin-top:44px; padding-top:18px; color:var(--fg-faint); font-size:13px;}
+  footer a{color:var(--accent); text-decoration:none;}
+  footer a:hover{text-decoration:underline;}
+  .ev{color:#ffa657; font-family:Consolas,monospace; font-size:12.5px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>UI 渲染实现与字体图集深度分析</h1>
+  <div class="subtitle">王者万象棋 · OpenGL 局内截帧（无泛光）· RenderDoc MCP 取证</div>
+  <div class="meta">
+    <span class="chip">截帧文件：<b>D:/Renderdoc 截帧/王者万象棋/OpengGL/局内-无泛光.rdc</b></span>
+    <span class="chip">API：<b>OpenGL</b></span>
+    <span class="chip">分析日期：<b>2026-09-22</b></span>
+    <span class="chip">工具：<b>RenderDoc MCP（官方 qrenderdoc）</b></span>
+  </div>
+</header>
+
+<h2>0. 摘要</h2>
+<div class="panel">
+<p>本截帧的 UI 由 <b>Unity UGUI（Canvas 批渲染）</b>实现，绘制在<b>全分辨率合成目标</b>（2558×1438）上；3D 场景实际以 2132×1198（≈0.83×）渲染后经泛光合成 pass 上采样，UI 则以原生分辨率叠加（场景低清 + UI 原生的混合策略，详见第 2、7 节）。文字渲染采用 <b>「单通道 R8 动态字体图集 + 统一 UI Shader」</b>方案：截帧中存在两张字体图集（2048×2048 和 1024×1024，均为 R8_UNORM 单通道），即纹理浏览器里看到的那张<b>「密密麻麻」的字形大图</b>。它的作用是：</p>
+<ul>
+  <li><b>字形位图缓存</b>：TTF 字形首次使用时按需光栅化并紧密打包进图集，之后每帧直接以纹理 quad 采样，避免重复光栅化；</li>
+  <li><b>合批基础</b>：同一图集 + 同一材质的多个 Text 合并为少量 draw call（本帧 10 个文字 draw 共约 354 个字形 quad，最大单 draw 合并了 180 个字形）；</li>
+  <li><b>省内存/带宽</b>：每像素仅 1 字节（alpha-only），文字颜色完全由顶点色 × tint 决定，与 RGBA 图集（4 字节/像素）相比省 75% 显存。</li>
+</ul>
+<p>GPU 侧文字渲染成本极低（10 个 draw 合计约 <b>0.106ms</b>）；UGUI 的开销主要在 CPU 侧（Canvas 网格重建），GPU 侧不构成瓶颈。</p>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><div class="v">508</div><div class="l">全帧 Draw Call（OpenGL）</div></div>
+  <div class="kpi"><div class="v">10</div><div class="l">文字 Draw（2 张字体图集）</div></div>
+  <div class="kpi"><div class="v">~354</div><div class="l">字形 Quad（每字 6 索引）</div></div>
+  <div class="kpi"><div class="v">5MB</div><div class="l">字体图集常驻显存（2048²+1024²，R8）</div></div>
+  <div class="kpi"><div class="v green">0.106ms</div><div class="l">文字 Draw GPU 耗时合计</div></div>
+</div>
+
+<h2>1. 截帧概况</h2>
+<table>
+  <tr><th>项目</th><th>数值</th><th>项目</th><th>数值</th></tr>
+  <tr><td>图形 API</td><td>OpenGL</td><td>总 Action 数</td><td class="num">549</td></tr>
+  <tr><td>Draw Call</td><td class="num">508</td><td>Clear</td><td class="num">21</td></tr>
+  <tr><td>纹理资源</td><td class="num">373</td><td>缓冲资源</td><td class="num">375</td></tr>
+  <tr><td>Present（SwapBuffers）</td><td class="num">2（<span class="ev">EID 89</span> / <span class="ev">9328</span>，中间为完整一帧）</td><td>顶层 Pass 标记</td><td class="num">10</td></tr>
+</table>
+<p class="src">数据来源：RenderDoc MCP <code>get_frame_summary</code> / <code>get_capture_status</code>。</p>
+
+<h2>2. 帧结构与 UI 在帧中的位置</h2>
+<p>一帧（<span class="ev">EID 90 → 9328</span>，以 SwapBuffers 为界）的完整数据流如下（20260922 二次取证修订版）：</p>
+<pre>
+┌─ [场景管线 · 本帧消费] CSM 阴影(D16 1024²) → 中间 RT(80108，红色清除)
+│
+├─ <b>本帧场景渲染 ──▶ RT 80804（2132×1198 RGBA8 ≈ 0.83× 低分辨率）</b>  <span class="c">[Colour Pass #3，265 draw]</span>
+│
+├─ 后处理合成：
+│    <span class="ev">5797</span> 泛光阈值降采样（80804 → 80811，533×599）
+│    <span class="ev">5820</span> 场景上采样 + 泛光模糊合成 ──▶ <b>17893</b>（2558×1438 全分辨率）
+│
+├─ <b>UI Pass（Colour Pass #5，EID 5817~6408）</b>：清深度 → UGUI 50 个 draw
+│    ├─ UI Sprite：图集 79955(1024² RGBA) / 73783(2048² RGBA) 等
+│    └─ <b>UI 文字：图集 290039(2048² R8) / 342140(1024² R8)</b>  ── 绘制在 17893 上
+│    → glFinish 同步
+│
+├─ 收尾拷贝链：17893(视图 16197) ─(draw <span class="ev">6435</span>)─▶ <b>17912</b>（2558×1438）
+│
+├─ <b>[场景管线 · 下一帧消费] CSM' + 中间 RT' + 场景预渲染 ──▶ 80804</b>    <span class="c">[Colour Pass #6~#7，EID 6713~9219]</span>
+│
+└─ 最终上屏：
+     17912 ─(旋转 mat3，draw <span class="ev">9274</span>)─▶ Texture 154（1440×2560 竖屏）
+          ─(gamma/亮度，draw <span class="ev">9321</span>)─▶ 交换链 ─▶ SwapBuffers（<span class="ev">9328</span>）
+</pre>
+<div class="callout blue">
+<b>要点</b>：① 屏幕物理为竖屏 1440×2560，游戏以横屏 2558×1438 合成，最后经一次 mat3 旋转 blit 进竖屏后缓冲，再做 gamma/亮度校正后呈现；② <b>3D 场景实际以 2132×1198（约 0.83×）渲染</b>，由 5820 上采样到全分辨率，而 <b>UI 在 2558×1438 全分辨率渲染</b>（场景低清 + UI 原生的混合策略）；③ 帧尾的第二个场景渲染是<b>下一帧场景的提前提交</b>（详见第 7 节）。
+</div>
+
+<h2>3. UI 渲染实现（UGUI 取证）</h2>
+
+<h3>3.1 共享 Canvas 网格缓冲</h3>
+<p>UI draw 大量使用 <code>glDrawElementsBaseVertex</code>，且 <code>base_vertex</code>/<code>index_offset</code> 持续递增（如文字 draw <span class="ev">5886</span> 的 base_vertex=52、index_offset=78；pass 末尾的 <span class="ev">9252</span> base_vertex=9943、index_offset=21576）。这是 Unity UGUI 的标志性实现：<b>整个 Canvas 的所有图元写入同一块大顶点/索引缓冲，各 UI 元素按区间切分绘制</b>，CPU 每帧重建网格，GPU 只按区间消费。</p>
+
+<h3>3.2 顶点格式与统一 Shader</h3>
+<p>UI 顶点输入（从 SPIR-V 还原）：position(float4) + color(float4) + uv(float2)，即 UGUI 标准的「位置 + 顶点色 + UV」。帧内 <b>Sprite（RGBA 图集）与文字（R8 图集）共用同一个 UI Shader</b>（ResourceId::16186 / 16187）：</p>
+<table>
+  <tr><th>Shader 端</th><th>Uniform（$Globals）</th><th>含义</th></tr>
+  <tr><td rowspan="3">Vertex（16186）</td><td><code>_u_Color</code> / <code>unity_MatrixVP</code> / <code>unity_ObjectToWorld</code></td><td>tint 颜色 + Canvas→裁剪空间变换</td></tr>
+  <tr><td>Pixel（16187）</td><td><code>_u_ClipRect</code>（vec4）</td><td>RectTransform 裁剪矩形，PS 内做 4 边硬裁剪，因子乘进 alpha</td></tr>
+  <tr><td>Pixel（16187）</td><td><code>_u_TextureSampleAdd</code>（vec4）</td><td>字形打包补偿常数（Unity UI/Default Font 同款机制）</td></tr>
+</table>
+
+<h3>3.3 像素着色器逻辑还原（对应 Unity「UI/Default Font」）</h3>
+<pre>
+<span class="c">// 事件 5886，Pixel Shader 16187，SPIR-V 反编译还原</span>
+<span class="k">float4</span> clip = <span class="f">step</span>(_u_ClipRect.xy, pos.xy) * <span class="f">step</span>(pos.xy, _u_ClipRect.zw);   <span class="c">// 矩形硬裁剪</span>
+<span class="k">float</span>  clipFactor = clip.x * clip.y;                                    <span class="c">// 0 或 1</span>
+<span class="k">float4</span> tex = <span class="f">texture</span>(_u_MainTex, uv);                                  <span class="c">// R8 字体图集（经 swizzle，alpha=字形覆盖度）</span>
+<span class="k">float4</span> col = (tex + _u_TextureSampleAdd) * vColor * _u_Color;          <span class="c">// 字形 × 顶点色 × tint</span>
+col.a *= clipFactor;                                                      <span class="c">// 裁剪只压 alpha</span>
+SV_Target0 = col;
+</pre>
+<p>每字形<b>单次采样、单 quad（2 三角形/6 索引）</b>，没有描边多次采样 —— 描边/发光等效果在图集内预先烘焙或直接不使用。文字颜色完全来自顶点色，这正是图集可以用 R8 单通道的原因。</p>
+
+<h2>4. 「密密麻麻」字体图集的作用</h2>
+
+<h3>4.1 图集基本规格</h3>
+<table>
+  <tr><th>图集 ResourceId</th><th>尺寸</th><th>格式</th><th>显存</th><th>使用 Draw 数</th><th>字形 Quad 数</th></tr>
+  <tr><td><code>Texture 290039</code></td><td class="num">2048×2048</td><td>R8_UNORM（单通道）</td><td class="num">4 MB</td><td class="num">7</td><td class="num">274</td></tr>
+  <tr><td><code>Texture 342140</code></td><td class="num">1024×1024</td><td>R8_UNORM（单通道）</td><td class="num">1 MB</td><td class="num">3</td><td class="num">80</td></tr>
+</table>
+<p class="src">数据来源：<code>find_draws_by_texture</code>（按图集逐一反查全部 508 个 draw）、<code>get_texture_info</code>。字形数 = 索引数 ÷ 6。</p>
+
+<h3>4.2 为什么「密密麻麻」—— 动态字体的工作方式</h3>
+<div class="panel">
+<p>这是 Unity <b>动态字体（Runtime Font Atlas）</b>的运行时图集，其填充逻辑决定了它必然长得密密麻麻：</p>
+<ol>
+  <li><b>按需光栅化</b>：文本首次需要某字形时，才从 TTF/OTF 光栅化当前字号的位图，然后<b>紧密打包（无排序、无间隙）</b>进图集空闲区域；</li>
+  <li><b>汉字集巨大</b>：中文常用字数千个（GB2312 共 6763 字），局内文本（英雄名、装备、伤害数字、技能描述…）在一局游戏里累计触达的字形会持续堆积；</li>
+  <li><b>字号/样式碎片</b>：同一字体的每种字号、加粗、描边变体都是独立位图，全部堆进同一张图集；</li>
+  <li><b>只增不减</b>：图集在会话内从不回收字形（直到写满重建），所以长时间游玩后看到的图集几乎无空隙 —— 即截帧中观察到的效果。</li>
+</ol>
+<p>两张图集并存，对应<b>两个不同的字体</b>（典型如：正文/中文字体 2048² + 数字/标题等专用字体 1024²），各自独立维护动态图集。</p>
+</div>
+
+<h3>4.3 图集在渲染管线中的三重作用</h3>
+<ul>
+  <li><span class="tag tag-ok">缓存</span> <b>字形位图缓存</b>：光栅化结果复用，避免每帧对每个字做 TTF 曲线填充；<b>文字 = 普通纹理 quad</b>。</li>
+  <li><span class="tag tag-ok">合批</span> <b>合批的钥匙</b>：同图集 + 同材质 ⇒ UGUI 可把多个 Text 合并成一个 draw。证据：<span class="ev">6194</span> 单个 draw 承载 180 个字形（1080 索引）；当文字被裁剪矩形、图集切换、渲染顺序打断时才拆分为新 draw —— 这解释了为何 274 个字形拆成 7 个 draw。</li>
+  <li><span class="tag tag-ok">省资源</span> <b>内存/带宽优化</b>：R8 单通道 1 字节/像素（对比 RGBA 图 4 字节/像素），采样带宽同样减 75%；颜色信息零存储，由顶点色实时提供。</li>
+</ul>
+
+<h3>4.4 全部文字 Draw 明细</h3>
+<table>
+  <tr><th>Event ID</th><th>索引数</th><th>字形数</th><th>图集</th><th>GPU 耗时 (ms)</th></tr>
+  <tr><td><span class="ev">5869</span></td><td class="num">24</td><td class="num">4</td><td>2048² R8</td><td class="num">0.0440</td></tr>
+  <tr><td><span class="ev">5886</span></td><td class="num">30</td><td class="num">5</td><td>1024² R8</td><td class="num">0.0266</td></tr>
+  <tr><td><span class="ev">5901</span></td><td class="num">210</td><td class="num">35</td><td>2048² R8</td><td class="num">0.0020</td></tr>
+  <tr><td><span class="ev">5919</span></td><td class="num">60</td><td class="num">10</td><td>2048² R8</td><td class="num">0.0020</td></tr>
+  <tr><td><span class="ev">6090</span></td><td class="num">24</td><td class="num">4</td><td>2048² R8</td><td class="num">0.0010</td></tr>
+  <tr><td><span class="ev">6194</span> <span class="tag tag-info">最大批次</span></td><td class="num">1080</td><td class="num">180</td><td>2048² R8</td><td class="num">0.0102</td></tr>
+  <tr><td><span class="ev">6223</span></td><td class="num">210</td><td class="num">35</td><td>2048² R8</td><td class="num">0.0092</td></tr>
+  <tr><td><span class="ev">6226</span></td><td class="num">120</td><td class="num">20</td><td>1024² R8</td><td class="num">0.0031</td></tr>
+  <tr><td><span class="ev">6241</span></td><td class="num">36</td><td class="num">6</td><td>2048² R8</td><td class="num">0.0010</td></tr>
+  <tr><td><span class="ev">6397</span></td><td class="num">330</td><td class="num">55</td><td>1024² R8</td><td class="num">0.0072</td></tr>
+  <tr><td><b>合计</b></td><td class="num"><b>2124</b></td><td class="num"><b>~354</b></td><td>—</td><td class="num"><b>0.1063</b></td></tr>
+</table>
+<p class="src">数据来源：<code>get_action_timings</code>（marker_filter=Colour Pass #5，GPU 计数器可用）。</p>
+
+<h2>5. UI Pass 的 GPU 耗时画像</h2>
+<table>
+  <tr><th>项目</th><th>耗时</th><th>说明</th></tr>
+  <tr><td>UI Pass 总计（Colour Pass #5）</td><td class="num">6.29 ms</td><td>52 个 Action</td></tr>
+  <tr><td>├ glInvalidateFramebuffer</td><td class="num">1.91 ms</td><td>放弃上一帧内容（TILE 内存 GPU 上的常见行为）</td></tr>
+  <tr><td>├ glFinish（Pass 末同步）</td><td class="num">2.51 ms</td><td>等待此前场景渲染排空，非 UI 本身开销</td></tr>
+  <tr><td>├ 占位 draw（<span class="ev">5820</span>，3 索引）</td><td class="num">0.45 ms</td><td>Pass 起始的 3 索引 draw，疑似驱动/引擎状态重置占位</td></tr>
+  <tr><td>├ 文字 draw × 10</td><td class="num">0.106 ms</td><td><b>本报告主题</b></td></tr>
+  <tr><td>└ 其余 UI Sprite / 世界特效 draw</td><td class="num">≈1.3 ms</td><td>含 <span class="ev">6366</span>(0.36ms)、<span class="ev">5881</span>(0.13ms)、<span class="ev">5851</span>(0.09ms) 等</td></tr>
+</table>
+<div class="callout green"><b>结论</b>：文字渲染的 GPU 成本可以忽略（0.106ms，占 UI Pass 纯 draw 的约 6%）。单 draw 最大 0.044ms，多数在 0.01ms 以下 —— 「密密麻麻」的图集在 GPU 侧是非常廉价的资源。</div>
+
+<h2>6. 优化建议</h2>
+<div class="panel">
+<ol>
+  <li><span class="tag tag-warn">显存</span> <b>动态图集膨胀风险</b>：2048² R8（4MB）+ 1024² R8（1MB）常驻；图集写满会触发<b>整图重建</b>（新分配 + 重新上传 4MB + 全部字形重光栅化），在低端机上表现为偶发卡顿尖峰。可对局内固定文案（技能名、固定 UI 词）使用<b>静态烘焙字库子集</b>，仅动态数字走动态字体。</li>
+  <li><span class="tag tag-warn">CPU</span> <b>Canvas 重建开销才是 UGUI 主成本</b>：伤害跳字、倒计时等每帧变化文本会持续重建网格（见 base_vertex 持续增长的共享大缓冲）。建议把高频变化文字拆到独立 Canvas/子层级，避免整 Canvas 重算。</li>
+  <li><span class="tag tag-ok">合批</span> 已有良好实践（180 字形合入单 draw），保持「同字体、同图集、同层级」可进一步减少 10 个文字 draw 的拆分（拆分源于 ClipRect/穿插的 Sprite）。</li>
+  <li><span class="tag tag-info">进阶</span> 若需彻底压缩图集显存：SDF/TextMeshPro 方案可用一张小图集覆盖全部字号（签名距离场缩放），代价是 PS 稍复杂。</li>
+</ol>
+</div>
+
+<h2>7. 附加发现：「画面渲染两次」的真相 —— 场景渲染提前一帧（render-ahead）</h2>
+<div class="panel">
+<p>初版报告曾把帧尾的第二轮场景渲染（<span class="ev">EID 6713~9219</span>，写入 RT 80804）误判为「疑似无泛光下遗留的冗余重绘」。二次取证后<b>结论反转</b>，证据链如下：</p>
+<ol>
+  <li><b>80804 是主场景 RT，且每帧窗口内「先被消费、后被重写」</b>：<span class="ev">5797/5820</span>（帧开头）把它作为 <code>_u_BloomSrcTex</code>/<code>_u_BloomTex</code> 上采样合成到 17893；随后 <span class="ev">7116</span> 清空、<span class="ev">7138~9219</span> 重新渲染整个场景进同一 RT。第二轮的输出在本帧内<b>没有任何消费者</b>（全帧 508 个 draw 反查，80804 的采样者仅 5797/5820）→ 只能被下一帧消费。</li>
+  <li><b>两轮绘制序列逐条对齐，但内容状态不同</b>：两轮 draw 序列前 35+ 项完全一致（72, 39, 4704, 1068, 13272, 4290, 1995, 9723, 6216, 2064, 3708, 3432, 228, …），是同一套场景管线；但特效段出现<b>粒子四边形数量漂移</b>（对齐位置上 54→48、60→54 quads），且第二轮比第一轮少了约 150 个特效 draw → 第二轮的 draw list 是用<b>更晚的游戏状态</b>（特效已衰减/结束）构建的，即下一帧的状态。</li>
+  <li><b>结构完全对称</b>：第二轮也带自己的 CSM 阴影（Depth-only #2）与中间 RT pass（Colour #6），构成完整的「下一帧场景流水线」；但<b>没有</b> UI、合成与 present —— 它只是下一帧的「场景部分」提前提交。</li>
+</ol>
+<p><b>结论</b>：引擎做了<b>场景渲染提前一帧提交</b>的流水线化设计——第 N 帧的命令窗口内（present 之前）就已提交第 N+1 帧的场景渲染。RenderDoc 以 present 划分帧边界，所以截帧里看起来像「一帧渲染了两遍场景」。收益：GPU 在 CPU 构建 N+1 帧的 UI/逻辑期间就开始执行下一帧场景，缩短 present 到 present 的关键路径。显示内容上场景(N) 与 UI(N) 出自同一游戏状态（场景在 N-1 窗口渲染、UI 在 N 窗口渲染），不引入额外显示延迟。</p>
+<p><b>关于「多线程改造」的推断</b>：截帧只能证明<b>命令层面的提前提交</b>（资源读写顺序 + 内容状态漂移），无法证明线程拓扑——RenderDoc 捕获的是串行化后的命令流，线程/提交者信息已丢失。「main / render / cmd 提交线程」的三线程结构是合理推测但不可从截帧证实；且本截帧为 OpenGL（非 Vulkan），单上下文命令本身即串行，提前提交是<b>调度设计</b>而非并行执行。</p>
+</div>
+
+<h2>数据来源与取证方法</h2>
+<div class="src">
+<p><b>数据来源</b>：RenderDoc 官方实例（IPC %TEMP%\renderdoc_mcp），截帧 <code>D:/Renderdoc 截帧/王者万象棋/OpengGL/局内-无泛光.rdc</code>。</p>
+<p><b>取证命令链</b>：<code>get_frame_summary</code> → <code>get_draw_calls</code>（marker/事件区间过滤）→ <code>get_pipeline_state</code>（逐 draw 绑定分析，定位 UI/文字 shader 与图集）→ <code>get_shader_source</code>（SPIR-V 反编译，事件 5886 VS/PS 全文还原）→ <code>find_draws_by_texture</code>（图集 342140 / 290039 反查使用方）→ <code>get_draw_call_details</code>（RT/深度输出、base_vertex/index_offset）→ <code>get_texture_info</code>（图集规格）→ <code>get_action_timings</code>（GPU 计时）。</p>
+<p><b>二次取证（20260922 修订，判定第 7 节 render-ahead 结论）</b>：<code>find_draws_by_texture</code>(80804 / 17893 / 16197) 反查资源消费链 → <code>get_draw_calls</code>(Colour Pass #3 / #7 全量列表) 逐条比对两轮绘制序列 → <code>get_pipeline_state</code>(5797 / 5820 / 702 / 7116 / 6366) 确认泛光合成与清屏目标 → <code>get_draw_call_details</code>(2335 / 5820 / 6435 / 9274) 串联 RT 写读顺序。</p>
+<p><b>判定依据</b>：UI 文字 draw 的识别标准 = PS 含 <code>_u_ClipRect</code> + <code>_u_TextureSampleAdd</code>（Unity UI/Default Font 特征 uniform）且绑定 R8_UNORM 单通道纹理；UGUI 架构判定 = 共享大网格缓冲上的 BaseVertex 区间绘制。</p>
+</div>
+
+<footer>
+  <p><b>MAX 项目性能分析系列报告</b>（.codebuddy/reports/，20260922）：</p>
+  <p>
+    <a href="memory_report_20260922.html">memory_report</a> ·
+    <a href="memory_snapshot_analysis_20260922.html">memory_snapshot_analysis</a> ·
+    <a href="shader_font_memory_deepdive_20260922.html">shader_font_memory_deepdive</a> ·
+    <a href="shader_duplication_explained_20260922.html">shader_duplication_explained</a> ·
+    <a href="bundle_system_analysis_20260922.html">bundle_system_analysis</a> ·
+    <b>ui_font_atlas_analysis（本报告）</b>
+  </p>
+  <p style="margin-top:8px;">生成于 2026-09-22 · RenderDoc MCP 自动化取证 · 自包含 HTML（无外部依赖）</p>
+</footer>
+
+</div>
+</body>
+</html>

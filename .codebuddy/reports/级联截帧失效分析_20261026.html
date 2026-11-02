@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>级联截帧失效分析 — 2026-10-26 官方 RenderDoc 双重注入复发</title>
+<style>
+body{background:#1b1e24;color:#d7dae0;font:14px/1.6 "Segoe UI",sans-serif;max-width:1100px;margin:24px auto;padding:0 20px}
+h1{color:#7ec8ff;border-bottom:2px solid #374050;padding-bottom:8px}
+h2{color:#9fd3a8;margin-top:32px}
+table{border-collapse:collapse;width:100%;margin:12px 0}
+th,td{border:1px solid #374050;padding:6px 10px;text-align:left;vertical-align:top}
+th{background:#262b35;color:#7ec8ff}
+code{background:#262b35;padding:1px 5px;border-radius:3px;color:#ffd479}
+pre{background:#12151a;border:1px solid #374050;border-radius:6px;padding:12px;overflow-x:auto;color:#c8e6c9}
+.bad{color:#ff8a8a}.good{color:#8ce99a}.warn{color:#ffd479}
+.box{background:#232833;border-left:4px solid #7ec8ff;padding:10px 14px;margin:12px 0}
+.box.err{border-left-color:#ff8a8a}
+footer{margin-top:40px;padding-top:12px;border-top:1px solid #374050;color:#8a919e;font-size:12px}
+</style>
+</head>
+<body>
+<h1>级联截帧失效分析（2026-10-26 14:41 MuMu 会话）</h1>
+
+<div class="box err"><b>结论：</b>级联截帧没有"功能退化"，而是<b>根本没跑到 fork 的代码</b>——目标进程
+<code>MuMuNxDevice.exe [PID 25544]</code> 被官方 RenderDoc 与 fork rendertest <b>双重注入</b>，
+官方 build 抢先占有了全部 GL/Vulkan 设备和该 PID 的 target-control 通道。14:41 的 10 次截帧实际全部由
+<b>官方 build 的 GL driver 执行</b>（官方代码里没有级联逻辑），所以只产出单份 GL 上屏帧（~103MB），
+没有 Vulkan 游戏真帧 <code>capture.rdc</code>，fork 侧日志连一行 <code>Cascade bridge diagnostics</code> 都没有。</div>
+
+<h2>一、数据来源</h2>
+<table>
+<tr><th>文件</th><th>角色</th></tr>
+<tr><td><code>%TEMP%\RenderTest\RenderDoc_2026.10.26_14.23.23.log</code></td><td>qrendertest UI（pid 2280/11848）日志</td></tr>
+<tr><td><code>%TEMP%\RenderTest\RenderDoc_app_2026.10.26_14.28.08.log</code></td><td>fork rendertest.dll 注入 MuMuNxDevice [25544] 的目标侧日志</td></tr>
+<tr><td><code>%TEMP%\RenderDoc\RenderDoc_2026.10.26_14.25.55.log</code></td><td>官方 qrenderdoc UI（pid 16280）+ 其注入进程的合并日志</td></tr>
+<tr><td>注册表 <code>HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers</code>（含 WOW6432Node）</td><td>同名 layer 注册现状</td></tr>
+</table>
+
+<h2>二、时间线（取证证据）</h2>
+<table>
+<tr><th>时间</th><th>事件</th><th>证据</th></tr>
+<tr><td>14:23:23</td><td>qrendertest（fork, build dc8ac178）启动</td><td>RenderTest UI 日志创建</td></tr>
+<tr><td class="bad">14:25:56</td><td class="bad">官方 qrenderdoc（build e4bd23b6）以<b>管理员</b>启动 → 重新注册官方 Vulkan layer</td><td>官方日志 L7：<code>Running as administrator</code>；注册表现状三家同名 manifest 全部启用（值 0）：<code>rendertest.json</code> / <code>C:\Program Files\RenderDoc\renderdoc.json</code> / <code>epcat.json</code></td></tr>
+<tr><td class="bad">14:27:06</td><td class="bad">官方 UI attach/拉起 MuMuNxDevice [25544]，官方 renderdoc.dll <b>随进程启动注入</b>，绑定该 PID 的 target-control 通道</td><td>官方日志 L92/L98/L113：<code>Loading into ...\MuMuNxDevice.exe</code> + <code>Got remote handshake: MuMuNxDevice [25544]</code></td></tr>
+<tr><td>14:27:12 起</td><td>25544 内全部 GL 上下文被官方 WrappedOpenGL 注册（0x20000/0x30000/…）</td><td>官方日志 L247+：<code>Adding OpenGL device frame capturer</code>（core.cpp:2317 = 官方行号）</td></tr>
+<tr><td>14:28:08</td><td>fork rendertest.dll 注入同一进程 25544（晚到 62 秒）</td><td>RenderTest app 日志 L1/L3：<code>Loading into ...\MuMuNxDevice.exe</code>，pid 025544</td></tr>
+<tr><td class="bad">14:28:09 / 14:32 / 14:35</td><td class="bad">25544 创建的 Vulkan 实例经 loader 选择<b>官方 layer</b>，Vulkan 设备全部注册进官方进程内表（9-28 已文档化的同名 layer 抢注重现）</td><td>官方日志 L656/L700/L729：<code>Adding Vulkan device frame capturer</code> ×4；fork app 日志同时间段<b>无任何 Adding 行</b></td></tr>
+<tr><td>14:38:35</td><td>qrendertest UI 连接 25544 的 target-control —— 先到先得，实际连上的是<b>官方 dll 的服务端</b>（协议同版兼容）</td><td>RenderTest UI 日志 L346：<code>Got remote handshake: MuMuNxDevice [25544]</code></td></tr>
+<tr><td class="bad">14:41:17–14:41:59</td><td class="bad">用户在 qrendertest 触发 10 次截帧，全部由<b>官方 GL driver</b> 执行：单份 GL capture ×10（frame 28687→31065），无 capture_2.rdc，无任何 Cascade 行</td><td>官方日志 L764+：<code>gl_driver.cpp(2286) Starting capture … Captured GL frame 107MB</code>；RenderTest UI 日志 L368/L420/L503-510：<code>Got a new capture 0..9</code>，文件落在 <code>%TEMP%\RenderDoc\</code>（官方路径）</td></tr>
+</table>
+
+<h2>三、失效根因链</h2>
+<pre>
+官方 qrenderdoc 以管理员启动（14:25:56）
+  ├─ ① 重新启用官方 renderdoc.json 注册 → fork 启动时的自修复被覆盖
+  │     （HKLM ImplicitLayers 三家同名 VK_LAYER_RENDERDOC_Capture 全部启用，loader 去重结果不可控）
+  └─ ② 抢先 attach MuMuNxDevice [25544]（14:27:06，进程启动级注入）
+        ├─ GL：官方 dll 先 hook WGL，全部上下文注册进官方表
+        ├─ Vulkan：loader 选官方 layer，设备注册进官方表（= 9-28 根因复发）
+        └─ target-control 通道被官方 dll 先绑定
+fork rendertest.dll 晚 62s 注入（14:28:08）
+  └─ 进程内 capturer 表全空（app 日志无任何 Adding/Cascade 行）
+qrendertest UI 触发截帧（14:41）
+  └─ 消息送达官方 dll 的 target-control → 官方 GL driver 执行
+       └─ 官方代码无级联逻辑 → 单份 GL 上屏帧 ×10，Vulkan 游戏真帧丢失
+</pre>
+<p>与 2026-09-28 文档（<code>级联截帧分析.html</code> / <code>util/mumu-capture/README.md</code>）
+的"同名 Vulkan layer 抢注"同族，本次叠加了<b>两个新变种</b>：</p>
+<ul>
+<li>官方 UI 直接抢先 attach 了同一目标进程（GL 侧也被抢，不只 Vulkan）；</li>
+<li>target-control 通道先到先得，qrendertest UI 的触发消息实际送进了官方 dll——
+所以连 fork 的级联代码都没被执行，排查时 fork 日志"干净"得具有迷惑性。</li>
+</ul>
+
+<h2>四、处置（恢复级联）</h2>
+<ol>
+<li>关闭官方 qrenderdoc 实例（pid 16280）；截 MuMu 期间不要再开官方 UI——它每次以管理员启动都会重新注册自己的 layer。</li>
+<li><b>以管理员重启 qrendertest</b>：fork 启动自修复（<code>qrenderdoc.cpp</code> main → <code>RENDERDOC_UpdateVulkanLayerRegistration(true)</code>）会把 <code>renderdoc.json</code> / <code>epcat.json</code> 等冲突注册禁用；确认 CaptureDialog 警告条消失（非管理员启动会静默失败）。</li>
+<li><b>完全重启 MuMu</b>：已注入进程的官方 dll 无法卸载，必须重启目标进程。</li>
+<li>只用 qrendertest 一家 attach 目标。</li>
+</ol>
+
+<h2>五、验证清单（截帧前）</h2>
+<table>
+<tr><th>检查</th><th>期望</th></tr>
+<tr><td>25544 进程模块列表</td><td class="good">只有 <code>rendertest.dll</code>，无 <code>C:\Program Files\RenderDoc\renderdoc.dll</code></td></tr>
+<tr><td><code>%TEMP%\RenderTest\RenderDoc_app_*.log</code>（目标侧）</td><td class="good">出现 <code>Adding Vulkan device frame capturer</code>（core.cpp:<b>2310</b> = fork 行号；2317 是官方）</td></tr>
+<tr><td>截帧时 fork 目标侧日志</td><td class="good"><code>Cascade bridge diagnostics: starting N capturers</code>，Vulkan 设备存活时 N≥2</td></tr>
+<tr><td>产出文件</td><td class="good">GL 上屏帧 + <code>capture.rdc</code>（Vulkan 游戏真帧，~1GB）成对出现；文件落在 fork 的临时目录</td></tr>
+<tr><td>注册表 ImplicitLayers</td><td class="good">仅 <code>rendertest.json</code> = 0，其余同名 manifest = 1（禁用）</td></tr>
+</table>
+<p class="warn">注：纯 GL 上屏进程 N=1 属预期（WrappedOpenGL 每进程单例，单捕获覆盖全部 sharegroup）；
+本次要恢复的是 GL（上屏）+ Vulkan（游戏真帧）的跨 API 级联 N≥2。</p>
+
+<h2>六、永久修复方案（三处单点改动 + 一条纪律）</h2>
+<p>三处失效环节在 fork 代码里各有单点开关，全部改掉后该问题不再可能静默复发：</p>
+<table>
+<tr><th>#</th><th>改动</th><th>位置</th><th>根治什么</th></tr>
+<tr><td>1</td><td>fork 的 Vulkan layer 改名 <code>VK_LAYER_RENDERDOC_Capture_RT</code>，启用环境变量改名 <code>ENABLE_VULKAN_RENDERTEST_CAPTURE</code></td><td><code>renderdoc/common/globalconfig.h</code>（RENDERDOC_VULKAN_LAYER_NAME / RENDERDOC_VULKAN_LAYER_VAR）+ <code>renderdoc/renderdoc.vcxproj</code> 两个 PropertyGroup 的 <code>&lt;VulkanLayerName&gt;/&lt;VulkanEnableVar&gt;</code>（构建时 stamp 进 rendertest.json）</td><td>注册表同名互斥。改名后官方与 fork manifest 可共存，loader 不再二选一；fork 注入时 hook 强制启用自己的 layer 名（vk_device_funcs.cpp:120/618 走同一常量），官方 layer 因启用变量名不同在 fork 进程里永远休眠 → Vulkan 设备确定性地注册进 fork 的表</td></tr>
+<tr><td>2</td><td>target-control 协议号改为 fork 专属值（如 109，仅接受 109）</td><td><code>renderdoc/core/target_control.cpp:36</code> <code>TargetControlProtocolVersion</code> / <code>IsProtocolVersionSupported</code></td><td>"静默连错服务端"。rendertest UI 再连到官方 dll 时握手即拒绝，双注入从"抓出错的文件"变成"显式报错"</td></tr>
+<tr><td>3</td><td>target-control 端口段迁移（38920 → 48920）</td><td><code>renderdoc/common/globalconfig.h:143</code> <code>RenderDoc_FirstTargetControlPort</code></td><td>进程发现层隔离。UI 枚举时探测不到官方 dll 的端口段，attach 列表里根本不会出现官方注入的进程；同进程双注入时两 dll 也不再抢 38920</td></tr>
+</table>
+<p>配套纪律：官方 qrenderdoc <b>不要以管理员运行</b>（非管理员写不了 HKLM，无法复活其 layer 注册）；
+最好直接卸载官方 RenderDoc 与 EPCat（epcat.json 是第三个同名 layer 注册者）。改名后这些不再是必需，但仍建议保持。</p>
+<p>可选加固：fork core 初始化时 <code>GetModuleHandleA("renderdoc.dll")</code> 非空即 RDCWARN 并在 handshake 上报——
+GL 侧"谁先注入谁赢"无法从注册表根治，显式告警是底线。</p>
+<p class="warn">改名注意：json 里 <code>VK_LAYER_RENDERDOC_CaptureGetInstanceProcAddr</code> 等导出符号名<b>不要动</b>
+（它们只是 dll 导出函数名，不是 layer 身份）；Android 路径（android.cpp 的 gpu_debug_layers）走同一常量自动跟随。</p>
+
+<footer>系列报告：<code>级联截帧分析.html</code>（2026-09-28 初版，仓库根目录） ·
+<code>util/mumu-capture/README.md</code> · 本报告 <code>.codebuddy/reports/级联截帧失效分析_20261026.html</code></footer>
+</body>
+</html>

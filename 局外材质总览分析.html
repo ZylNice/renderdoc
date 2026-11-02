@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MAX 局外截帧 · 材质总览分析（英雄 / 特效）</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#1b3a2a,#2a1b4a);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#a8d8b9;font-size:14px}
+  main{max-width:1150px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #3ad0a0;padding-left:12px;margin:40px 0 16px;color:#c9f5e4}
+  h3{font-size:16px;color:#7fe6c0;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:#14241f;color:#7fe6c0;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#7fe6c0;font-size:12.5px}
+  pre{background:#0a0f1a;border:1px solid #26324c;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55;color:#c9d6ee}
+  .note{background:#14231d;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .ok{background:#14301f;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .warn{background:#331a1a;border-left:3px solid #e05a5a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#f0c8c8;margin:12px 0}
+  .formula{background:#0f1a15;border:1px dashed #2e7a5a;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:12.5px;color:#b8f0d8;white-space:pre-wrap}
+  .tag{display:inline-block;background:#1d3a2e;border:1px solid #3ad0a0;border-radius:4px;padding:0 8px;font-size:12px;color:#7fe6c0;margin-right:4px}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>局外截帧材质总览分析（英雄 / 特效为主）</h1>
+  <div class="sub">
+    截帧：<code>MAX-局外-真机截帧.rdc</code>（OpenGL ES）｜ 691 actions / 608 draws / 450 纹理 / 416 缓冲 ｜
+    分析方式：RenderDoc MCP 逐 draw 采样管线状态 + Shader 反编译交叉验证
+  </div>
+</header>
+<main>
+
+<h2>0. 帧结构总览</h2>
+<table>
+  <tr><th>Pass</th><th>子事件</th><th>内容推断</th></tr>
+  <tr><td>Depth-only Pass #1</td><td>13</td><td>深度预pass（主场景）</td></tr>
+  <tr><td>Colour Pass #1</td><td>44</td><td>场景组 A（含 16 个英雄 draw，EID 1560–2236）</td></tr>
+  <tr><td><b>Colour Pass #2（+Depth）</b></td><td><b>291</b></td><td><b>主场景 pass：场景建筑 + 英雄 + 全部特效粒子</b>（EID ~220–4600 段）</td></tr>
+  <tr><td>Colour Pass #3–#18</td><td>3 × 16</td><td>16 个小 RT pass（每 pass 3 事件：典型的小 RT 拷贝/后处理单元，如头像、缩略图、bloom 链节）</td></tr>
+  <tr><td>Colour Pass #19（+Depth）</td><td>126</td><td>场景组 B 主 pass（含第二组 16 个英雄 draw，EID 9479–10214）</td></tr>
+  <tr><td>Depth-only #2 / Colour #20 / #21 / #22</td><td>13+44+72+3</td><td>场景组 B 的镜像结构 + UI/收尾</td></tr>
+</table>
+<div class="note">全帧存在明显的<b>双场景组</b>结构（A 组与 B 组各渲染 16 个英雄 draw，同一 shader program 64777），推测为大厅双展示位/双相机。同一 program 的 Shader Edit 会同时影响两组。</div>
+<div class="warn">采样时确认：英雄 PS 64777 当前处于 <b>(Edited)</b> 状态（此前的纯白输出实验仍生效）。做材质观察前先在 Shader Edit 里撤销。</div>
+
+<h2>1. 材质全家福</h2>
+<table>
+  <tr><th>家族</th><th>Shader (VS/PS)</th><th>规模</th><th>纹理配置</th><th>一句话特征</th></tr>
+  <tr><td><span class="tag">英雄</span></td><td>64775 / 64777</td><td>32 draws（2 组×16）</td><td>3×256²（Albedo / LightTex 四通道遮罩 / Matcap 图集）</td><td>Matcap 卡通 PBR + 亮度雾 + Filmic tonemap，alpha 输出 PlayerId</td></tr>
+  <tr><td><span class="tag">场景</span></td><td>URP Lit 系（5949 行反编译）</td><td>主 pass 大索引 draw（21885 / 27585 / 62298 等）</td><td>MainTex/ORM/Lightmap/阴影/雾 cubemap 等 10+ 张</td><td>完整 URP 前向光照 + UE 式双层高度雾（MAXFOGCBuffer）</td></tr>
+  <tr><td><span class="tag">特效 E1</span> 双贴图滚动</td><td>6418 / 6419</td><td>≥6 draws（2679×3、3446×3）</td><td>2 张（256×128 + 128²）</td><td>双 UV 独立滚动叠加，AlphaVal/MaskScale 控制，氛围光带类</td></tr>
+  <tr><td><span class="tag">特效 E2</span> 遮罩+扭曲+溶解</td><td>64028 / 64029</td><td>3739（2484 索引）等</td><td>4 张（Mask 128² + 主图 + 扭曲 + 32×128 ramp）</td><td>全家桶粒子：4 组 UV 滚动 + UV 扭曲 + 溶解 + 多 blend 模式</td></tr>
+  <tr><td><span class="tag">特效 E3</span> 单图粒子</td><td>2144 / 2145</td><td>2953（1692 索引）等</td><td>1 张 256²</td><td>最简粒子：单 UV 滚动 + Color/AlphaVal/CurBlendMode</td></tr>
+  <tr><td><span class="tag">特效 E4</span> 溶解+Rim 幽灵</td><td>64334 / 64335</td><td>3677/3772/3866/3876（2628 索引×4）</td><td>2 张（128² 主图 + 256² 溶解图）</td><td>双色溶解边缘（DissColor1/2）+ Rim 发光 + AsGray 去色，残影/幽灵类</td></tr>
+  <tr><td><span class="tag">UI/小quad</span></td><td>多种</td><td>大量 6–192 索引小 draw</td><td>单图</td><td>散布主 pass 尾部及 #19/#21，glDrawElementsBaseVertex 批渲染</td></tr>
+</table>
+
+<h2>2. 英雄材质（64775/64777）</h2>
+<div class="ok">完整逐行分析见姊妹篇 <code>局外英雄材质FS分析.html</code>，此处为摘要。</div>
+<div class="formula">Albedo(MainTex.rgb×BaseColor, sRGB多项式解码)
+ → LightTex 解包：x=粗糙度 / y=金属度 / z=AO+Fresnel遮罩 / w=Glow遮罩
+ → Matcap 环境高光（HeroMatCup，LOD=lerp(1,rough,T2.w)×6，alpha=高光ramp）
+ → 直接光（T1.w × HeroLightIrradiance × ramp）
+ → Fresnel 边缘光（UseFullFresnel 决定遮罩取反）→ Glow 自发光
+ → VS 两路加色（T3/T4，受击/Rim）
+ → 亮度雾（luma 向 HeroFogColor 靠拢 + 保饱和修正，因子=vs_TEXCOORD7 来自 VS）
+ → 曝光（ExposureScale+1）×ExposureColor → HDR 压半（ExposureScale.w）
+ → Filmic tonemap（0.533/0.151/0.526/0.200/0.027）→ 输出 a=PlayerId</div>
+
+<h2>3. 场景材质（URP + UE 式高度雾）</h2>
+<div class="ok">完整分析见 <code>局外雾效调试分析.html</code> §4/§5。要点：前向 URP Lit（阴影/附加光/光照贴图全量）+ 双层指数高度雾（光学深度解析积分 → 透射率 + inscattering 合成），总开关 <code>_MAXDeferOpaqueFog</code> 决定雾在 PS 内合成还是走延迟 pass。</div>
+
+<h2>4. 特效材质详析</h2>
+
+<h3>4.1 E1 · 双贴图滚动特效（VS 6418 / PS 6419）</h3>
+<table>
+  <tr><th>代表 draw</th><td>EID 2679/2681/2683（624 索引×3 连发）、3446/3448/3450（564×3 连发）——同模型三连，典型多层叠加或多位点布置</td></tr>
+  <tr><th>纹理</th><td>_u_MainTex2（256×128，slot0）+ 128² 遮罩（slot1）</td></tr>
+  <tr><th>VS 常量</th><td>MainTex1_ST / MainTex2_ST 双 ST、ScrollX/Y + Scroll2X/Y <b>双路独立滚动速度</b>、_u_AlbedoColor/_u_Color 双色、_u_MMultiplier、_u_VisualClarity（清晰度/弱化控制）</td></tr>
+  <tr><th>PS 常量</th><td>_u_AlphaVal（总透明度）、_u_MaskScale、_u_MultiplyAlpha、_u_UVXX、_ug_ExposureScale（与英雄共用曝光体系）</td></tr>
+</table>
+<div class="formula">推测逻辑：color = tex1(uv·ST1 + t·Scroll1) × tex2(uv·ST2 + t·Scroll2) × Color × AlbedoColor
+alpha  *= AlphaVal × MultiplyAlpha；VisualClarity 做远距离/低端机弱化</div>
+
+<h3>4.2 E2 · 遮罩+扭曲+溶解全家桶（VS 64028 / PS 64029）</h3>
+<table>
+  <tr><th>代表 draw</th><td>EID 3739（2484 索引）——主场景大型氛围特效</td></tr>
+  <tr><th>纹理</th><td>4 张：_u_MaskTex（128²）+ 主图（128²）+ 256×128 + <b>32×128 竖条 ramp</b>（颜色渐变查找）</td></tr>
+  <tr><th>VS 常量</th><td><b>4 组 UV 滚动</b>（Main/Mask/Dist/Diss RollUV+ST）+ _u_ZOffset（深度偏移防穿模）</td></tr>
+  <tr><th>PS 常量</th><td>_u_CurBlendMode（shader 内混合模式选择）、_u_Dist/_u_Distortion_MainTex_Strength（UV 扭曲强度）、_u_DissFea/_u_DissInt/_u_DissolveChannel（溶解阈值/羽化/通道）、_u_Mask_Color/_u_Mask_Alpha/_u_Mask_Distortion/_u_Mask_Dissolve（<b>遮罩图四通道分工开关</b>）、_u_MainAlpha/_u_MultiplyAlpha</td></tr>
+</table>
+
+<h3>4.3 E3 · 最简单图粒子（VS 2144 / PS 2145）</h3>
+<div class="formula">VS：MainRollUV 单路滚动 + ZOffset；PS：tex × Color，alpha × MainAlpha × AlphaVal × MultiplyAlpha
+CurBlendMode 选择混合（加色/半透明）。代表 draw：EID 2953（1692 索引）</div>
+
+<h3>4.4 E4 · 溶解+Rim 幽灵特效（VS 64334 / PS 64335）</h3>
+<table>
+  <tr><th>代表 draw</th><td>EID 3677/3772/3866/3876（2628 索引×4 连发）</td></tr>
+  <tr><th>纹理</th><td>主图 128² + 溶解图 256²</td></tr>
+  <tr><th>溶解系</th><td>_u_DissInt（进度）/_u_DissFea（羽化）/_u_DissOffset/_u_DissSmooth/_u_Dissolve_Edge（边缘宽）/_u_DissColor1/_u_DissColor2（<b>双色溶解边缘</b>）/_u_DissolveChannel/_u_DissCoordsys/_u_Dissolve_UVChannel（坐标系与通道选择）/_u_DissIntAffectedByVertexAlpha</td></tr>
+  <tr><th>Rim 系</th><td>_u_RimColor/_u_RimGhost/_u_RimOffset/_u_RimSmooth/_u_ReverseGhost（反向幽灵=边缘镂空反渐变）</td></tr>
+  <tr><th>其他</th><td>_u_AsGray（去色）、_u_UseAlpha、_u_MainCoordsys、_u_Main_ClampUV；VS 带 WorldToObject + 相机位置（支持世界/视图坐标系溶解）</td></tr>
+</table>
+<div class="note">E4 常量多达 30 个，是局外特效里最复杂的一族——"英雄残影/灵魂现身"类表现大概率走它（ReverseGhost + 双色溶解边缘是典型特征）。</div>
+
+<h2>5. 特效调试配方（Shader Edit）</h2>
+<table>
+  <tr><th>目的</th><th>适用族</th><th>改法</th></tr>
+  <tr><td>冻结 UV 滚动（看静帧图案）</td><td>E1/E2/E3/E4</td><td>Edit <b>VS</b>：把 <code>_u_ScrollX/_u_ScrollY</code>（或 *RollUV）参与的时间项乘 0；或直接把滚动后的 uv 替换为原始 uv</td></tr>
+  <tr><td>看主图原始采样</td><td>全部</td><td>PS main 末尾 <code>SV_Target0 = texture(_u_MainTex, uv); return;</code></td></tr>
+  <tr><td>隔离遮罩通道</td><td>E2</td><td>输出 <code>vec4(vec3(texture(_u_MaskTex, maskUV).x), 1.0)</code>，x 换成 y/z/w 逐通道看</td></tr>
+  <tr><td>关 UV 扭曲</td><td>E2</td><td>把 <code>_u_Distortion_MainTex_Strength</code> 读取替换为常量 <code>0.0</code></td></tr>
+  <tr><td>溶解进度手动扫动</td><td>E2/E4</td><td>把 <code>_u_DissInt</code> 读取替换为常量（0→1 逐步 Refresh，观察边缘消隐）</td></tr>
+  <tr><td>溶解边缘标色验证</td><td>E4</td><td>把 <code>_u_DissColor1</code> 替换为 <code>vec4(10,0,0,1)</code>，边缘带会发出超亮红</td></tr>
+  <tr><td>验证混合模式</td><td>E2/E3</td><td>把 <code>_u_CurBlendMode</code> 替换为常量逐档试；<b>同时</b>在 Pipeline State → Output Merger 核对 GL blend 状态（shader 内选择与实际 glBlendFunc 需一致）</td></tr>
+  <tr><td>排查曝光对特效的影响</td><td>全部</td><td>特效 PS 普遍读 <code>_ug_ExposureScale</code>（与英雄同体系）；把曝光乘项替换为 <code>vec3(1.0)</code> 看原始亮度</td></tr>
+  <tr><td>反向幽灵/去色开关验证</td><td>E4</td><td><code>_u_ReverseGhost</code>/<code>_u_AsGray</code> 替换为 0/1 常量对比</td></tr>
+</table>
+<div class="warn">特效 draw 普遍多连发（×3/×4 同索引）：Edit 一个 program 会同时影响所有实例。若要只观察某一个，先用它前后的 marker/事件号在 Texture Viewer 里确认渲染位置，或临时给该 draw 前后加颜色标记（把 PS 输出乘以不同纯色逐 draw 区分不可行——同 program 共享修改，需改用 Event Browser 隐藏其他 draw 的方式观察）。</div>
+
+<h2>6. 观测与统计建议</h2>
+<div class="formula">1) 找指定 shader 的全部 draw：MCP find_draws_by_shader "64777" → 本帧 32 个英雄 draw
+   （EID 1560–2236 组A / 9479–10214 组B），同理可对 6419/64029/2145/64335 各特效族批量定位
+2) 特效 Overdraw 排查：主 pass 尾部 6–36 索引的小 draw 极多（粒子 quad），
+   Texture Viewer 切到该 RT 后逐 draw 翻页看叠加层次
+3) 特效贴图复用统计：Pipeline State 里纹理 ResourceId 可跨 draw 对比，
+   同一张 128² 被多族引用说明图集复用良好；反之可合并
+4) 英雄相关进阶调试（雾/Matcap/Fresnel/Glow 隔离）见《局外英雄材质FS分析.html》§5</div>
+
+</main>
+<footer>由 RenderDoc MCP（renderdoc）截帧分析生成 ｜ MAX-局外-真机截帧.rdc ｜ 英雄 64775/64777 ｜ 特效 6418/6419 · 64028/64029 · 2144/2145 · 64334/64335 ｜ 配套：《局外英雄材质FS分析.html》《局外雾效调试分析.html》</footer>
+</body>
+</html>

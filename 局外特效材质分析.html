@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MAX 局外 · 特效材质完整分析</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#2a1b3a,#1b3a3a);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#c9a8e8;font-size:14px}
+  main{max-width:1150px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #b07fe6;padding-left:12px;margin:40px 0 16px;color:#e4cfff}
+  h3{font-size:16px;color:#cda8f0;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:#221d2e;color:#cda8f0;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#cda8f0;font-size:12.5px}
+  pre{background:#0a0f1a;border:1px solid #26324c;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55;color:#c9d6ee}
+  .note{background:#1d1826;border-left:3px solid #b07fe6;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#e2d4f5;margin:12px 0}
+  .ok{background:#14301f;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .warn{background:#331a1a;border-left:3px solid #e05a5a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#f0c8c8;margin:12px 0}
+  .formula{background:#181422;border:1px dashed #5a3a7a;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:12.5px;color:#dcc8f5;white-space:pre-wrap}
+  .tag{display:inline-block;background:#241a33;border:1px solid #b07fe6;border-radius:4px;padding:0 8px;font-size:12px;color:#cda8f0;margin-right:4px}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>特效材质完整分析报告（局外）</h1>
+  <div class="sub">
+    截帧：<code>MAX-局外-真机截帧.rdc</code>（OpenGL ES）｜ 分析方式：RenderDoc MCP 逐 draw 采样管线状态 ｜
+    覆盖 4 个特效 shader 家族：6418/6419 · 64028/64029 · 2144/2145 · 64334/64335
+  </div>
+</header>
+<main>
+
+<h2>0. 特效在帧中的分布</h2>
+<div class="note">特效集中在 <b>Colour Pass #2（+Depth，291 子事件）</b>的中后段：不透明场景/英雄画完后，出现大量 6–2628 索引的 <code>glDrawElements / glDrawElementsBaseVertex</code> 粒子 draw。特征：<b>同一 model 多连发</b>（×3/×4 同索引连续出现）——同一特效 prefab 的多实例/多层叠加。所有特效 PS 普遍读 <code>_ug_ExposureScale</code>，与英雄共用同一曝光体系。</div>
+<table>
+  <tr><th>家族</th><th>Shader (VS/PS)</th><th>代表 draw</th><th>纹理数</th><th>一句话定位</th></tr>
+  <tr><td><span class="tag">E1</span> 双贴图滚动</td><td>6418 / 6419</td><td>2679/2681/2683（624×3）、3446/3448/3450（564×3）</td><td>2</td><td>双 UV 独立滚动叠加，氛围光带/流光</td></tr>
+  <tr><td><span class="tag">E2</span> 遮罩+扭曲+溶解</td><td>64028 / 64029</td><td>3739（2484 索引）</td><td>4</td><td>全家桶粒子：4 组 UV 滚动 + 扭曲 + 溶解 + ramp</td></tr>
+  <tr><td><span class="tag">E3</span> 单图粒子</td><td>2144 / 2145</td><td>2953（1692 索引）</td><td>1</td><td>最简粒子：单滚动 + 颜色/透明度调制</td></tr>
+  <tr><td><span class="tag">E4</span> 溶解+Rim 幽灵</td><td>64334 / 64335</td><td>3677/3772/3866/3876（2628×4）</td><td>2</td><td>双色溶解边缘 + Rim + 反向幽灵，残影/现身类</td></tr>
+</table>
+
+<h2>1. E1 · 双贴图滚动特效（VS 6418 / PS 6419）</h2>
+<h3>1.1 资源与常量</h3>
+<table>
+  <tr><th>纹理</th><td>slot0 <code>_u_MainTex2</code> 256×128；slot1 遮罩 128²（均 R8G8B8A8）</td></tr>
+  <tr><th>VS $Globals（13 项）</th><td><code>_u_MainTex1_ST</code>/<code>_u_MainTex2_ST</code> 双 ST；<code>_u_ScrollX/_u_ScrollY</code> + <code>_u_Scroll2X/_u_Scroll2Y</code> <b>双路独立滚动速度</b>；<code>_u_AlbedoColor</code>/<code>_u_Color</code> 双色；<code>_u_MMultiplier</code>；<code>_u_VisualClarity</code>（清晰度/弱化）；<code>_u_Time</code> + MVP/OW 矩阵</td></tr>
+  <tr><th>PS $Globals（6 项）</th><td><code>_u_AlphaVal</code>（总透明度）、<code>_u_MaskScale</code>、<code>_u_MultiplyAlpha</code>、<code>_u_UVXX</code>、<code>_u_VisualClarity</code>、<code>_ug_ExposureScale</code></td></tr>
+</table>
+<h3>1.2 推测逻辑</h3>
+<div class="formula">uv1 = uv·ST1 + t·(ScrollX, ScrollY);   uv2 = uv·ST2 + t·(Scroll2X, Scroll2Y)
+color = tex1(uv1) × tex2(uv2) × _u_Color × _u_AlbedoColor × _u_MMultiplier
+alpha *= _u_AlphaVal × _u_MultiplyAlpha × Mask(遮罩图，_u_MaskScale)
+最后 × _ug_ExposureScale 曝光；VisualClarity 做远距离/低端机弱化</div>
+<h2>2. E2 · 遮罩+扭曲+溶解全家桶（VS 64028 / PS 64029）</h2>
+<h3>2.1 资源与常量</h3>
+<table>
+  <tr><th>纹理</th><td>4 张：slot0 <code>_u_MaskTex</code> 128²；slot1 主图 128²；slot2 256×128（扭曲/噪声）；slot3 <b>32×128 竖条 ramp</b>（颜色渐变查找表）</td></tr>
+  <tr><th>VS $Globals（14 项）</th><td><b>4 组 UV 滚动+ST</b>：Main / Mask / Dist（扭曲）/ Diss（溶解）各一套 RollUV + ST；<code>_u_ZOffset</code>（深度偏移防穿模）；<code>_u_ProjectionParams</code>；MVP/OW/W2O 矩阵</td></tr>
+  <tr><th>PS $Globals（16 项）</th><td><code>_u_Color</code>；<code>_u_CurBlendMode</code>（shader 内混合模式选择）；<code>_u_Dist</code> / <code>_u_Distortion_MainTex_Strength</code> / <code>_u_Distortion_DissolveTex</code>（UV 扭曲）；<code>_u_DissFea</code>/<code>_u_DissInt</code>/<code>_u_DissolveChannel</code>/<code>_u_DissIntAffectedByVertexAlpha</code>（溶解阈值/羽化/通道/顶点alpha联动）；<code>_u_Mask_Color</code>/<code>_u_Mask_Alpha</code>/<code>_u_Mask_Distortion</code>/<code>_u_Mask_Dissolve</code>/<code>_u_MaskChannel</code>（<b>遮罩图分工开关</b>）；<code>_u_MainAlpha</code>/<code>_u_MultiplyAlpha</code></td></tr>
+</table>
+<h3>2.2 推测逻辑</h3>
+<div class="formula">distUV = uv + 扭曲图采样 × _u_Distortion_MainTex_Strength      // 主图扭曲
+main = tex_main(distUV 滚动后) × _u_Color × ramp(32×128 查表)
+mask = tex_MaskTex(uv 滚动后)，按 Mask_Color/Alpha/Distortion/Dissolve 开关
+     把 mask 的某通道（_u_MaskChannel）分别用于：调色 / alpha / 扭曲量 / 溶解阈值
+dissolve = step/smoothstep(溶解图通道, _u_DissInt ± _u_DissFea 羽化)
+alpha = main.a × mask.a × dissolve × _u_MainAlpha × _u_MultiplyAlpha
+按 _u_CurBlendMode 选择最终输出形式（加色/半透明混合）</div>
+<h2>3. E3 · 单图粒子（VS 2144 / PS 2145）</h2>
+<table>
+  <tr><th>纹理</th><td>仅 1 张 <code>_u_MainTex</code> 256²</td></tr>
+  <tr><th>VS $Globals（8 项）</th><td><code>_u_MainRollUV</code> 单路滚动 + <code>_u_MainTex_ST</code> + <code>_u_ZOffset</code> + 矩阵</td></tr>
+  <tr><th>PS $Globals（5 项）</th><td><code>_u_Color</code>、<code>_u_CurBlendMode</code>、<code>_u_MainAlpha</code>、<code>_u_AlphaVal</code>、<code>_u_MultiplyAlpha</code></td></tr>
+</table>
+<div class="formula">color = tex(uv·ST + t·RollUV) × _u_Color
+alpha = tex.a × _u_MainAlpha × _u_AlphaVal × _u_MultiplyAlpha
+// 最简粒子，性能最好；调复杂度不够时才升级到 E2/E4</div>
+<h2>4. E4 · 溶解+Rim 幽灵特效（VS 64334 / PS 64335）</h2>
+<h3>4.1 资源与常量</h3>
+<table>
+  <tr><th>纹理</th><td>slot0 主图 128²；slot1 溶解图 256²</td></tr>
+  <tr><th>VS $Globals（13 项）</th><td>Main/Diss 双坐标系选择（<code>_u_MainCoordsys</code>/<code>_u_DissCoordsys</code>：UV/世界/视图）+ 双 RollUV/ST + <code>_u_Dissolve_UVChannel</code> + <code>_u_ZOffset</code> + 全套矩阵（含 W2O，支持世界空间溶解）</td></tr>
+  <tr><th>PS $Globals（30 项）</th><td>见下表</td></tr>
+</table>
+<table>
+  <tr><th>分组</th><th>常量</th><th>含义</th></tr>
+  <tr><td>基础</td><td><code>_u_Color</code> / <code>_u_MainAlpha</code> / <code>_u_MultiplyAlpha</code> / <code>_u_UseAlpha</code> / <code>_u_AsGray</code> / <code>_u_CurBlendMode</code> / <code>_u_Main_ClampUV</code></td><td>染色、alpha 链、去色开关、UV clamp</td></tr>
+  <tr><td>溶解</td><td><code>_u_DissInt</code> / <code>_u_DissFea</code> / <code>_u_DissOffset</code> / <code>_u_DissSmooth</code> / <code>_u_Dissolve_Edge</code> / <code>_u_DissolveChannel</code> / <code>_u_DissIntAffectedByVertexAlpha</code></td><td>进度 / 羽化 / 偏移 / 平滑 / <b>边缘宽度</b> / 通道 / 顶点alpha联动</td></tr>
+  <tr><td>溶解边缘色</td><td><code>_u_DissColor1</code> / <code>_u_DissColor2</code></td><td><b>双色边缘</b>（典型：内缘亮橙+外缘暗红燃烧边）</td></tr>
+  <tr><td>Rim</td><td><code>_u_RimColor</code> / <code>_u_RimGhost</code> / <code>_u_RimOffset</code> / <code>_u_RimSmooth</code> / <code>_u_ReverseGhost</code></td><td>边缘发光；<b>ReverseGhost=反向幽灵</b>（边缘镂空反向渐变）</td></tr>
+  <tr><td>其他</td><td><code>_u_Time</code> / <code>_u_WorldSpaceCameraPos</code> / <code>_uhlslcc_mtx4x4unity_MatrixV</code></td><td>PS 内时间动画与视角相关计算</td></tr>
+</table>
+<h3>4.2 推测逻辑</h3>
+<div class="formula">main = tex_main(uv) × _u_Color（AsGray=1 时先转灰度）
+diss = 溶解图采样(_u_DissolveChannel) → smoothstep(_u_DissInt±_u_DissFea/_u_DissSmooth)
+edge = 1 - smoothstep(diss - _u_Dissolve_Edge, diss, ...)   // 边缘带
+edgeColor = lerp(_u_DissColor1, _u_DissColor2, 边缘带内位置)
+rim = smoothstep(NdotV + _u_RimOffset, _u_RimSmooth) × _u_RimGhost × _u_RimColor
+      （_u_ReverseGhost=1 时取反，形成"边缘镂空"幽灵感）
+out = (main + edgeColor×edge + rim) × alpha链 × dissolve 裁剪</div>
+</main>
+<footer>由 RenderDoc MCP（renderdoc）截帧分析生成 ｜ MAX-局外-真机截帧.rdc ｜ 特效族：6418/6419 · 64028/64029 · 2144/2145 · 64334/64335</footer>
+</body>
+</html>

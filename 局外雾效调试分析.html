@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MAX 局外截帧 · 雾效 Shader 调试指南</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#1b2a3a,#2a1b3a);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#9fc3e8;font-size:14px}
+  main{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #4aa3e0;padding-left:12px;margin:40px 0 16px;color:#bfe0ff}
+  h3{font-size:16px;color:#79c7ff;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:#17242e;color:#79c7ff;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#79c7ff;font-size:12.5px}
+  pre{background:#0a0f1a;border:1px solid #26324c;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55;color:#c9d6ee}
+  .note{background:#14202e;border-left:3px solid #4aa3e0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#cfe6f8;margin:12px 0}
+  .ok{background:#14301f;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .warn{background:#331a1a;border-left:3px solid #e05a5a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#f0c8c8;margin:12px 0}
+  .formula{background:#101a26;border:1px dashed #2e5a7a;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:12.5px;color:#bfe0ff;white-space:pre-wrap}
+  .flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0;font-size:12.5px}
+  .flow .step{background:#14202e;border:1px solid #2e5a7a;border-radius:6px;padding:5px 10px}
+  .flow .arrow{color:#4aa3e0}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>雾效 Shader 调试指南（局外真机截帧）</h1>
+  <div class="sub">
+    截帧：<code>MAX-局外-真机截帧.rdc</code>（OpenGL ES，GLSL ES 320 反编译）｜ 代表 draw：EID 1745 <code>glDrawElements</code>（666 索引）｜
+    PS <code>ResourceId::64777</code> / VS <code>ResourceId::64775</code> ｜ 配套文档：《英雄FS分析.html》（局内版）
+  </div>
+</header>
+<main>
+
+<h2>0. 重要：当前 shader 处于"纯白"改动状态</h2>
+<div class="warn">EID 1745 的 PS（64777）反编译末尾存在一行 <code>*_uSV_Target0 = {1.0000, 1.0000, 1.0000, 1.0000};</code> —— 即上一轮的"输出纯白"修改<b>仍在生效</b>，它覆盖了包括雾效在内的全部原始计算。开始调试雾效前，请先在 Shader Viewer → Edit 中<b>删掉这一行</b>（GLSL 源码视图里是 <code>SV_Target0 = vec4(1.0);</code>），恢复原始逻辑。</div>
+
+<h2>1. 本截帧的两套雾系统</h2>
+<table>
+  <tr><th>雾系统</th><th>所属 shader</th><th>雾因子来源</th><th>PS 中的形态</th></tr>
+  <tr><td><b>A. 英雄亮度雾</b></td><td>英雄 FS 64777（EID 1745）</td><td>VS 预算 → varying <code>vs_TEXCOORD7</code>（float）</td><td>亮度插值：把像素亮度向雾色亮度拉近，并做保饱和度修正</td></tr>
+  <tr><td><b>B. 场景 UE 式高度雾</b></td><td>场景/背景 FS（即 D:\新建 文本文档.txt，5949 行）</td><td>PS 内逐像素解析积分（世界坐标 <code>vs_TEXCOORD1</code> + 相机位置）</td><td>双层指数高度雾 + 方向性日光 inscattering + Inscattering Cubemap，<code>MAXFOGCBuffer</code>（binding 2）传参</td></tr>
+</table>
+<div class="note">调试前先确认你要调的是哪一套：英雄身上的雾看 §2/§3；场景背景（地板、建筑）的雾看 §4/§5。两套雾的参数互不相干。</div>
+
+<h2>2. 英雄亮度雾（FS 64777）逻辑精解</h2>
+<h3>2.1 雾效代码段（SPIR-V → GLSL 还原）</h3>
+<div class="formula">// vs_TEXCOORD7 = VS 传入的雾因子（0=无雾，1=全雾）
+float fogLuma  = dot(_ug_HeroFogColor.rgb, vec3(0.3, 0.59, 0.11));
+float pixLuma  = dot(color,             vec3(0.3, 0.59, 0.11));
+float lumaDiff = fogLuma - pixLuma;
+color = color + vec3(lumaDiff) * vs_TEXCOORD7;   // ★ 核心：只改亮度，不改色相
+
+// 保饱和度修正（亮度推移后越界则重算）
+float minC = min(min(color.r, color.g), color.b);
+float maxC = max(max(color.r, color.g), color.b);
+if (minC &lt; 0.0) color = luma + (color - luma) * luma / (luma - minC);  // 负通道回拉
+if (maxC &gt; 1.0) color = luma + (color - luma) * (1.0 - luma) / (maxC - luma); // 超亮压缩</div>
+
+<h3>2.2 雾之后的固定流程</h3>
+<div class="flow">
+  <span class="step">亮度雾混合</span><span class="arrow">→</span>
+  <span class="step">保饱和修正</span><span class="arrow">→</span>
+  <span class="step">×(_ug_ExposureScale.rgb+1)×_u_ExposureColor</span><span class="arrow">→</span>
+  <span class="step">HDR 压半(_ug_ExposureScale.w)</span><span class="arrow">→</span>
+  <span class="step">Filmic tonemap</span><span class="arrow">→</span>
+  <span class="step">输出(w=_u_PlayerId)</span>
+</div>
+<div class="warn">雾在 tonemap <b>之前</b>。所以把雾因子直接覆写到 <code>SV_Target0</code> 时务必 <code>return</code> 跳过后续，否则你看到的是 tonemap 后的因子，数值失真。</div>
+
+<h3>2.3 雾因子的来源（VS 64775，$Globals）</h3>
+<table>
+  <tr><th>常量</th><th>含义</th></tr>
+  <tr><td><code>_ug_HeroFogColor</code> (vec4)</td><td>英雄雾颜色（PS 只取 rgb 算亮度）</td></tr>
+  <tr><td><code>_ug_HeroFogIntensity</code> (float)</td><td>雾强度</td></tr>
+  <tr><td><code>_ug_HeroFogParam</code> (vec4)</td><td>雾距离参数（起点/斜率等，VS 内参与因子计算）</td></tr>
+</table>
+<div class="note">PS 改不了雾的"远近/浓度曲线"——因子在 VS 里由 <code>_ug_HeroFogParam</code>/<code>_ug_HeroFogIntensity</code> 算出后经 <code>vs_TEXCOORD7</code> 插值传入。要调曲线形态请 Edit VS（64775）。</div>
+
+<h2>3. 英雄雾：Shader Edit 调试配方</h2>
+<p>操作路径：Event Browser 选 EID 1745 → Pipeline State → FS 阶段 → <b>Edit</b> → 改完 <b>Refresh</b> 重放整帧。</p>
+<table>
+  <tr><th>目的</th><th>改法（GLSL 反编译源码）</th></tr>
+  <tr><td>恢复正常（撤销纯白）</td><td>删掉末尾 <code>SV_Target0 = vec4(1.0, 1.0, 1.0, 1.0);</code> 一行</td></tr>
+  <tr><td>可视化雾因子分布</td><td>main 开头插入：<code>SV_Target0 = vec4(vec3(vs_TEXCOORD7), 1.0); return;</code>（黑=无雾，白=全雾）</td></tr>
+  <tr><td>可视化雾色亮度差</td><td>在 lumaDiff 算完后插入：<code>SV_Target0 = vec4(vec3(lumaDiff) * 0.5 + 0.5, 1.0); return;</code>（0.5 灰=无差异，偏亮=雾更亮）</td></tr>
+  <tr><td>关闭英雄雾</td><td>把 <code>color + vec3(lumaDiff) * vs_TEXCOORD7</code> 对应那行（反编译为 <code>u_xlat16_2 = ...</code> 的累加行）改为直接 <code>u_xlat16_2.xyz = u_xlat16_0.xyz;</code>（即不加 diff 项）</td></tr>
+  <tr><td>雾拉满看极限效果</td><td>把该行里的 <code>vs_TEXCOORD7</code> 替换为常量 <code>1.0</code></td></tr>
+  <tr><td>雾色标红看作用范围</td><td>把 <code>_ug_HeroFogColor</code> 的读取替换为 <code>vec4(10.0, 0.0, 0.0, 1.0)</code>（超亮红，雾区一目了然）</td></tr>
+  <tr><td>调雾的远近/浓度曲线</td><td>Edit <b>VS 64775</b>：找到写 <code>vs_TEXCOORD7</code> 的赋值，乘系数或改 <code>_ug_HeroFogParam</code> 的参与方式</td></tr>
+</table>
+
+<h2>4. 场景 UE 式高度雾（背景 FS）逻辑精解</h2>
+<h3>4.1 两段式结构</h3>
+<div class="flow">
+  <span class="step">① 光学深度积分（567–667 行）</span><span class="arrow">→</span>
+  <span class="step">…（中间是光照/GGX/阴影，与雾无关）…</span><span class="arrow">→</span>
+  <span class="step">② 雾应用（5873–5926 行）</span><span class="arrow">→</span>
+  <span class="step">曝光/输出（5936–5947 行）</span>
+</div>
+<div class="formula">// ① 因子段（567–667）：相机→像素射线做解析积分
+dist   = length(worldPos - camPos);                    // u_xlat0.x
+// 提前退出：dist &lt; _StartDistance 或 _FogMaxOpacity&lt;=0 或 dist &gt; _FogCutoffDistance
+//   → 透射率 u_xlat10.x=1，无雾
+// 第一层：_FogDensity/_FogHeight/_FogHeightFalloff → 光学深度 u_xlat111
+// 第二层：_SecondFogDensity/...                   → 光学深度 u_xlat310（叠加）
+optDepth = layer1 + layer2;                            // u_xlat310（643 行合并）
+transmittance = max(1 - _FogMaxOpacity, exp2(-optDepth));  // u_xlat10.x
+firstLayerWeight  = u_xlat311;   // 第一层占雾色权重
+secondLayerWeight = u_xlat304;   // 第二层权重（含方向性衰减）
+
+// ② 应用段（5873–5926）：仅当 _MAXDeferOpaqueFog &lt;= 0.5 走此分支
+fogColor = (_FogInscatteringColor * firstLayerWeight
+          + _SecondFogInscatteringColor * secondLayerWeight)
+          * InscatteringCubemap(可选) * (1 - transmittance);
+fogColor += 方向性日光散射(pow(NdotL_sun, _DirectionalInscatteringExponent))
+          + 天空环境贡献(_AtmoSkyIrradiance * _HeightFogContribution);
+color = litColor * transmittance + fogColor;         // ★ 5926 行：最终合成</div>
+
+<h3>4.2 关键常量（MAXFOGCBuffer，binding 2）</h3>
+<table>
+  <tr><th>常量</th><th>含义</th><th>常量</th><th>含义</th></tr>
+  <tr><td><code>_FogInscatteringColor</code></td><td>第一层雾色</td><td><code>_SecondFogInscatteringColor</code></td><td>第二层雾色</td></tr>
+  <tr><td><code>_FogDensity</code></td><td>第一层浓度</td><td><code>_SecondFogDensity</code></td><td>第二层浓度</td></tr>
+  <tr><td><code>_FogHeight / _FogHeightFalloff</code></td><td>第一层基准高度/衰减</td><td><code>_SecondFogHeight(Falloff)</code></td><td>第二层</td></tr>
+  <tr><td><code>_FogMaxOpacity</code></td><td>最大不透明度（钳透射率下限）</td><td><code>_FogCutoffDistance</code></td><td>截断距离（&gt;0 且 dist 超程则无雾）</td></tr>
+  <tr><td><code>_StartDistance</code> / <code>_StartDistanceSoftWidth</code></td><td>雾起点距离 / 软过渡宽度</td><td><code>_FogOrigin</code></td><td>雾原点（w 为混合权重）</td></tr>
+  <tr><td><code>_MAXDeferOpaqueFog</code></td><td><b>总开关</b>：≤0.5 时 PS 内应用雾；&gt;0.5 走延迟/合成 pass</td><td><code>_HeightFogContribution</code></td><td>高度雾对大气项的贡献系数</td></tr>
+</table>
+
+<h2>5. 场景高度雾：Shader Edit 调试配方</h2>
+<table>
+  <tr><th>目的</th><th>改法（5949 行反编译 GLSL，行号对应 D:\新建 文本文档.txt）</th></tr>
+  <tr><td>可视化透射率（雾量）</td><td>667 行（因子段结束 <code>}</code> 之后）插入：<code>SV_Target0 = vec4(vec3(u_xlat10.x), 1.0); return;</code>（白=无雾，黑=全遮）</td></tr>
+  <tr><td>可视化第一层雾权重</td><td>同上位置插入：<code>SV_Target0 = vec4(vec3(u_xlat311), 1.0); return;</code></td></tr>
+  <tr><td>可视化第二层雾权重</td><td>同上位置插入：<code>SV_Target0 = vec4(vec3(u_xlat304), 1.0); return;</code></td></tr>
+  <tr><td>关闭高度雾</td><td>5873 行 <code>u_xlatb101 = 0.5&gt;=_MAXDeferOpaqueFog;</code> 改为 <code>u_xlatb101 = false;</code>（走 else：直接输出光照结果）</td></tr>
+  <tr><td>强制启用雾（排查延迟雾路径）</td><td>同行改为 <code>u_xlatb101 = true;</code>（即使 _MAXDeferOpaqueFog&gt;0.5 也在 PS 内强制合成）</td></tr>
+  <tr><td>放大雾浓度 ×4</td><td>643 行 <code>u_xlat310 = u_xlat310 + u_xlat111;</code> 之后插入 <code>u_xlat310 = u_xlat310 * 4.0;</code>（光学深度加倍，指数级变浓）</td></tr>
+  <tr><td>只看雾色贡献（去掉被雾遮的本体）</td><td>5926 行 <code>u_xlat0.xyz = u_xlat16_2.xyz * u_xlat10.xxx + u_xlat0.xyz;</code> 去掉前半：<code>u_xlat0.xyz = u_xlat0.xyz;</code> 即只剩 inscattering</td></tr>
+  <tr><td>雾色标红看范围</td><td>5902 行 <code>_FogInscatteringColor.xyz</code> 替换为 <code>vec3(10.0, 0.0, 0.0)</code></td></tr>
+  <tr><td>隔离方向性日光散射</td><td>5914 行后把 <code>u_xlat16_306</code>（pow 散射项）乘 0，看纯高度雾底色</td></tr>
+  <tr><td>隔离 Cubemap 影响</td><td>5877 行 <code>u_xlatb1 = 0.5&lt;_UseInscatteringColorCubemap;</code> 改为 <code>false</code>（走 else：cubemap 项恒为 1）</td></tr>
+</table>
+<div class="warn">注意：若运行时 <code>_MAXDeferOpaqueFog &gt; 0.5</code>，雾根本不在此 shader 内合成（走延迟/合成 pass），此时在 5873 行强转 <code>true</code> 也只是一次"近似重演"，真正的雾参数要去后续的合成 pass 里找。先用 Debug Pixel 单步确认实际走了哪个分支。</div>
+
+<h2>6. 不改 shader 的观测手段</h2>
+<div class="formula">1) Event Browser 选 EID 1745 → Texture Viewer 右键目标像素 → Debug Pixel，逐指令看
+   vs_TEXCOORD7（英雄雾因子）/ u_xlat10.x（场景透射率）等中间值
+2) Pipeline State → VS → $Globals：查看 _ug_HeroFogColor / _ug_HeroFogIntensity / _ug_HeroFogParam 运行时值
+3) Pipeline State → FS → Uniform Buffers → MAXFOGCBuffer(binding 2)：整套高度雾参数当前值
+4) 对比法：同一像素分别 Debug 英雄 draw 与背景 draw，看两套雾因子是否匹配（接缝问题排查）</div>
+
+<h2>7. 与局内版（英雄FS分析.html）的差异速查</h2>
+<table>
+  <tr><th>项</th><th>局内（EID 1674，PS 1587007）</th><th>局外（EID 1745，PS 64777）</th></tr>
+  <tr><td>雾形态</td><td>距离雾 lerp(_m19) + 高度雾乘性(_m11/_m2/_m3)</td><td>亮度雾：luma 向 _ug_HeroFogColor 靠拢 + 保饱和</td></tr>
+  <tr><td>因子传递</td><td>VS 预算 → _70.w（×0.1 缩放）</td><td>VS 预算 → vs_TEXCOORD7（无缩放）</td></tr>
+  <tr><td>Tonemap</td><td Colspan="2">同款 Filmic 有理曲线（0.533/0.151/0.526/0.200/0.027），雾均在 tonemap 前</td></tr>
+</table>
+
+</main>
+<footer>由 RenderDoc MCP（renderdoc）截帧分析 + GLSL/SPIR-V 反编译交叉验证生成 ｜ MAX-局外-真机截帧.rdc ｜ EID 1745 ｜ PS 64777 / VS 64775 ｜ 场景高度雾参考 D:\新建 文本文档.txt（5949 行）</footer>
+</body>
+</html>

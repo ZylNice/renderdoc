@@ -1,0 +1,1344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>终末地·大地图 — Bloom 链 SPIR-V 反汇编全集 20260928</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --border:#30363d;
+    --fg:#e6edf3; --fg-dim:#8b949e; --accent:#58a6ff; --good:#3fb950;
+    --warn:#d29922; --violet:#bc8cff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.65;padding:24px;max-width:1400px;margin:0 auto}
+  h1{font-size:24px;border-bottom:2px solid var(--violet);padding-bottom:10px;margin-bottom:6px}
+  h2{font-size:19px;color:var(--accent);margin:30px 0 10px;border-left:4px solid var(--accent);padding-left:10px}
+  h3{font-size:15px;color:var(--violet);margin:16px 0 6px}
+  .meta{color:var(--fg-dim);font-size:13px;margin-bottom:20px}
+  .toc{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 20px;margin:16px 0;font-size:13.5px}
+  .toc a{color:var(--accent);text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  pre{background:#0a0e14;border:1px solid var(--border);border-radius:8px;padding:14px 16px;overflow-x:auto;font-family:Consolas,"Cascadia Mono",monospace;font-size:12px;color:#c9d1d9;margin:10px 0;line-height:1.45;counter-reset:ln}
+  .note{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--warn);border-radius:6px;padding:12px 16px;margin:12px 0;font-size:13.5px}
+  .note.green{border-left-color:var(--good)} .note.blue{border-left-color:var(--accent)} .note.violet{border-left-color:var(--violet)}
+  code{background:#21262d;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12.5px;color:#ffa657}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+  th{background:var(--panel2);color:var(--accent);text-align:left;padding:8px 10px;border:1px solid var(--border)}
+  td{padding:6px 10px;border:1px solid var(--border);vertical-align:top}
+  .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#33254d;color:var(--violet);margin-right:4px}
+  .foot{margin-top:36px;padding-top:14px;border-top:1px solid var(--border);color:var(--fg-dim);font-size:12px}
+  ul{margin:8px 0 8px 22px} li{margin:3px 0}
+</style>
+</head>
+<body>
+
+<h1>《终末地》大地图 — Bloom 链 SPIR-V 反汇编全集</h1>
+<div class="meta">
+  截帧：<code>D:\Renderdoc 截帧\终末地\大地图.rdc</code> · Vulkan · RenderDoc MCP get_shader_info 原始反汇编（未删节）
+  · 2026-09-28 · 系列报告：渲染流程总分析（4.4/4.8 节）同目录
+</div>
+
+<div class="toc">
+  <b>目录（Bloom 链执行顺序）</b><br>
+  ① <a href="#s1">亮部提取 Bright-Pass</a> —— CS 126477 @ E5263（Karis 软阈值 + NaN 防护 + luma 抗闪烁加权）<br>
+  ② <a href="#s2">降采样高斯（共享内存融合 H+V）</a> —— CS 126528 @ E5267/E5291（9-tap 二项式核，单 dispatch 双向模糊）<br>
+  ③ <a href="#s3">金字塔混合 Upsample-Blend</a> —— CS 126533 @ E5319（FMix 强度混合）<br>
+  ④ <a href="#s4">最终合成中的 Bloom 叠加</a> —— PS 126537 @ E5327（锐化+Bloom+vignette+LUT 调色+sRGB+颗粒）
+</div>
+
+<div class="note blue">
+  <b>阅读指引：</b>反汇编为 RenderDoc 生成的 SPIR-V 文本（spiregg 反编译风格）。每条指令形如 <code>结果 = 操作(操作数)</code>。<code>Image&lt;float, 2D&gt;</code>=纹理，<code>StorageImage</code>=可写存储图像，<code>Image&lt;float, Subpass&gt;</code>=subpass 输入附件，<code>Workgroup uint[128]</code>=共享内存。各节开头的分析框给出关键指令位置。
+</div>
+
+<h2 id="s1">① 亮部提取 —— CS ResourceId::126477 @ E5263（Compute Pass #3 首 dispatch）</h2>
+<div class="note green">
+  <b>要点定位：</b>4 个对角采样偏移 <code>{0.9,−0.4}/{−0.9,0.4}/{0.4,0.9}/{−0.4,−0.9}</code>；每 tap 先 <code>Bitcast</code> 后与 <code>2139095040</code>（0x7F7FFFFF=FLT_MAX）比较做 NaN/Inf 防护；Karis 软阈值 <code>NMax(maxc−threshold,0) → ×knee² </code>；luma 系数 <code>{0.2126, 0.7153, 0.0722}</code>；加权 <code>1/(luma+1)</code> 后 4 tap 求和写 StorageImage。
+</div>
+<pre>SPIR-V 1.3 module, &lt;id&gt; bound of 222
+
+Generator: spiregg from Google - Contact Steven Perron, stevenperron@google.com
+Generator Version: 0
+
+Capability(Shader);
+Capability(StorageImageExtendedFormats);
+
+
+
+MemoryModel(Logical, GLSL450);
+
+EntryPoint(GLCompute, _2, "main", {
+    _3
+  });
+
+ExecutionMode(_2, LocalSize(8, 8, 1));
+
+
+
+
+struct _4 : [[Block]] {
+  float4 _child0 : [[Offset(0)]];
+  float4 _child1 : [[Offset(16)]];
+  float4 _child2 : [[Offset(32)]];
+  float4 _child3 : [[Offset(48)]];
+  float4 _child4 : [[Offset(64)]];
+  float4 _child5 : [[Offset(80)]];
+  [6] _child6 : [[Offset(96)]] : [[ArrayStride(16)]];
+  [6] _child7 : [[Offset(192)]] : [[ArrayStride(16)]];
+  float4 _child8 : [[Offset(288)]];
+  float4 _child9 : [[Offset(304)]];
+  float4 _child10 : [[Offset(320)]];
+  float4 _child11 : [[Offset(336)]];
+  float4 _child12 : [[Offset(352)]];
+  float4 _child13 : [[Offset(368)]];
+  float4 _child14 : [[Offset(384)]];
+  float4 _child15 : [[Offset(400)]];
+  float _child16 : [[Offset(416)]];
+  float _child17 : [[Offset(420)]];
+  float _child18 : [[Offset(424)]];
+  uint _child19 : [[Offset(428)]];
+  float4 _child20 : [[Offset(432)]];
+  int4 _child21 : [[Offset(448)]];
+  float4 _child22 : [[Offset(464), RelaxedPrecision]];
+  float4 _child23 : [[Offset(480), RelaxedPrecision]];
+  float4 _child24 : [[Offset(496), RelaxedPrecision]];
+  float4 _child25 : [[Offset(512)]];
+  float4 _child26 : [[Offset(528)]];
+  float4 _child27 : [[Offset(544)]];
+  float4 _child28 : [[Offset(560)]];
+  float4 _child29 : [[Offset(576)]];
+  float4 _child30 : [[Offset(592)]];
+  float4 _child31 : [[Offset(608)]];
+  [4] _child32 : [[Offset(624)]] : [[ArrayStride(16)]];
+  [4] _child33 : [[Offset(688)]] : [[ArrayStride(16)]];
+  [4] _child34 : [[Offset(752)]] : [[ArrayStride(16)]];
+  [4] _child35 : [[Offset(816)]] : [[ArrayStride(16)]];
+  float4 _child36 : [[Offset(880)]];
+  float4 _child37 : [[Offset(896)]];
+  [4] _child38 : [[Offset(912)]] : [[ArrayStride(16)]];
+  [4] _child39 : [[Offset(976)]] : [[ArrayStride(16)]];
+  [4] _child40 : [[Offset(1040)]] : [[ArrayStride(16)]];
+  float4 _child41 : [[Offset(1104)]];
+  float4 _child42 : [[Offset(1120)]];
+  float4 _child43 : [[Offset(1136), RelaxedPrecision]];
+  float4 _child44 : [[Offset(1152), RelaxedPrecision]];
+  float4 _child45 : [[Offset(1168), RelaxedPrecision]];
+  float4 _child46 : [[Offset(1184), RelaxedPrecision]];
+  float4 _child47 : [[Offset(1200), RelaxedPrecision]];
+  float4 _child48 : [[Offset(1216), RelaxedPrecision]];
+  float4 _child49 : [[Offset(1232)]];
+  float4 _child50 : [[Offset(1248)]];
+  float4 _child51 : [[Offset(1264), RelaxedPrecision]];
+  float4 _child52 : [[Offset(1280)]];
+  float4 _child53 : [[Offset(1296)]];
+  float4 _child54 : [[Offset(1312)]];
+  float4 _child55 : [[Offset(1328)]];
+  float4 _child56 : [[Offset(1344)]];
+  float4 _child57 : [[Offset(1360)]];
+  float4 _child58 : [[Offset(1376)]];
+  float4 _child59 : [[Offset(1392)]];
+  float4 _child60 : [[Offset(1408)]];
+  float4 _child61 : [[Offset(1424)]];
+  float4 _child62 : [[Offset(1440)]];
+  float4 _child63 : [[Offset(1456)]];
+  float4 _child64 : [[Offset(1472)]];
+  float4 _child65 : [[Offset(1488)]];
+  float4 _child66 : [[Offset(1504)]];
+  float4 _child67 : [[Offset(1520)]];
+  float4 _child68 : [[Offset(1536)]];
+  float4 _child69 : [[Offset(1552), RelaxedPrecision]];
+  float4 _child70 : [[Offset(1568), RelaxedPrecision]];
+  float4 _child71 : [[Offset(1584), RelaxedPrecision]];
+  float4 _child72 : [[Offset(1600), RelaxedPrecision]];
+  float4 _child73 : [[Offset(1616), RelaxedPrecision]];
+  float4 _child74 : [[Offset(1632), RelaxedPrecision]];
+  float4 _child75 : [[Offset(1648)]];
+  float4 _child76 : [[Offset(1664)]];
+  float4 _child77 : [[Offset(1680)]];
+  float4 _child78 : [[Offset(1696)]];
+  float4 _child79 : [[Offset(1712), RelaxedPrecision]];
+  float4 _child80 : [[Offset(1728), RelaxedPrecision]];
+  float4 _child81 : [[Offset(1744), RelaxedPrecision]];
+  float4 _child82 : [[Offset(1760), RelaxedPrecision]];
+  float4 _child83 : [[Offset(1776), RelaxedPrecision]];
+  float4 _child84 : [[Offset(1792), RelaxedPrecision]];
+  float4 _child85 : [[Offset(1808), RelaxedPrecision]];
+  float4 _child86 : [[Offset(1824), RelaxedPrecision]];
+  float4 _child87 : [[Offset(1840), RelaxedPrecision]];
+  float4 _child88 : [[Offset(1856), RelaxedPrecision]];
+  float4 _child89 : [[Offset(1872)]];
+  float4 _child90 : [[Offset(1888), RelaxedPrecision]];
+  float4 _child91 : [[Offset(1904), RelaxedPrecision]];
+  float4 _child92 : [[Offset(1920), RelaxedPrecision]];
+  float4 _child93 : [[Offset(1936), RelaxedPrecision]];
+  float4 _child94 : [[Offset(1952), RelaxedPrecision]];
+  float4 _child95 : [[Offset(1968), RelaxedPrecision]];
+  float4 _child96 : [[Offset(1984)]];
+  float4 _child97 : [[Offset(2000)]];
+  float4 _child98 : [[Offset(2016)]];
+  [2] _child99 : [[Offset(2032)]] : [[ArrayStride(16)]];
+  [2] _child100 : [[Offset(2064)]] : [[ArrayStride(16)]];
+  float _child101 : [[Offset(2096)]];
+  float _child102 : [[Offset(2100)]];
+  float _child103 : [[Offset(2104)]];
+  float _child104 : [[Offset(2108)]];
+  float4 _child105 : [[Offset(2112)]];
+  float4 _child106 : [[Offset(2128)]];
+  float4 _child107 : [[Offset(2144), RelaxedPrecision]];
+  float4 _child108 : [[Offset(2160), RelaxedPrecision]];
+  float4 _child109 : [[Offset(2176), RelaxedPrecision]];
+  float4 _child110 : [[Offset(2192), RelaxedPrecision]];
+  float4 _child111 : [[Offset(2208)]];
+  float4 _child112 : [[Offset(2224), RelaxedPrecision]];
+  float4 _child113 : [[Offset(2240)]];
+  float4 _child114 : [[Offset(2256), RelaxedPrecision]];
+  float4 _child115 : [[Offset(2272)]];
+  float4 _child116 : [[Offset(2288)]];
+  float4 _child117 : [[Offset(2304)]];
+  float4 _child118 : [[Offset(2320)]];
+  float4 _child119 : [[Offset(2336)]];
+  float4 _child120 : [[Offset(2352)]];
+  float4 _child121 : [[Offset(2368), RelaxedPrecision]];
+  float4 _child122 : [[Offset(2384)]];
+  float4 _child123 : [[Offset(2400), RelaxedPrecision]];
+  float4 _child124 : [[Offset(2416), RelaxedPrecision]];
+  float4 _child125 : [[Offset(2432), RelaxedPrecision]];
+  float4 _child126 : [[Offset(2448), RelaxedPrecision]];
+  float4 _child127 : [[Offset(2464), RelaxedPrecision]];
+  float4 _child128 : [[Offset(2480)]];
+  float4 _child129 : [[Offset(2496), RelaxedPrecision]];
+  float4 _child130 : [[Offset(2512), RelaxedPrecision]];
+  float4 _child131 : [[Offset(2528), RelaxedPrecision]];
+  float4 _child132 : [[Offset(2544), RelaxedPrecision]];
+  float4 _child133 : [[Offset(2560), RelaxedPrecision]];
+  float4 _child134 : [[Offset(2576), RelaxedPrecision]];
+  float4x4 _child135 : [[RowMajor, MatrixStride(16), Offset(2592)]];
+  float4 _child136 : [[Offset(2656)]];
+  float4 _child137 : [[Offset(2672)]];
+  [32] _child138 : [[Offset(2688)]] : [[ArrayStride(16)]];
+}
+struct _12 : [[Block]] {
+  float4 _child0 : [[Offset(0)]];
+  float4 _child1 : [[Offset(16), RelaxedPrecision]];
+  float4 _child2 : [[Offset(32), RelaxedPrecision]];
+  float4 _child3 : [[Offset(48), RelaxedPrecision]];
+}
+Uniform struct4* _5 : [[DescriptorSet(1), Binding(0)]];
+UniformConstant sampler* _7 : [[DescriptorSet(0), Binding(2)]];
+UniformConstant Image&lt;float, 2D&gt;* _9 : [[DescriptorSet(0), Binding(1)]];
+UniformConstant StorageImage&lt;float, 2D&gt;* _11 : [[DescriptorSet(0), Binding(0)]];
+Uniform struct12* _13 : [[DescriptorSet(1), Binding(1)]];
+Input uint3* _3 : [[BuiltIn(GlobalInvocationId)]];
+
+void _2() {
+  uint3 _157 = *_3;
+  uint2 _158 = _157.xy;
+  float2 _159 = ConvertUToF(_158);
+  float4* _160 = &amp;_13._child0;
+  float4 _161 = *_160;
+  float2 _162 = _161.zw;
+  float2 _163 = _159 + {0.5000, 0.5000};
+  float2 _164 = _163 * _162;
+  uint2 _165 = ConvertFToU(_159);
+  Image&lt;float, 2D&gt; _166 = *_9;
+  sampler _167 = *_7;
+  float4* _168 = &amp;_5._child0;
+  float4 _169 = *_168;
+  float2 _170 = _169.zw;
+  float2 _171 = {0.9000, -0.4000} * _170;
+  float2 _172 = _164 + _171;
+  SampledImage&lt;float, 2D&gt; _173 = SampledImage(_166, _167);
+  float4 _174 = ImageSampleExplicitLod(_173, _172, Lod(0.0000));
+  float3 _175 = _174.xyz;
+  uint3 _176 = Bitcast(_175);
+  bool _177 = _176 &lt; {2139095040, 2139095040, 2139095040};
+  float3 _178 = Select(_177, _175, {0.0000, 0.0000, 0.0000});
+  float4* _179 = &amp;_13._child1;
+  float* _180 = &amp;_13._child1.x;
+  float _33 = *_180 : [[RelaxedPrecision]];
+  float4 _34 = *_179 : [[RelaxedPrecision]];
+  float _37 = _178.x : [[RelaxedPrecision]];
+  float _38 = _178.y : [[RelaxedPrecision]];
+  float _39 = _178.z : [[RelaxedPrecision]];
+  float _52 = GLSL.std.450::NMax(_37, _38);
+  float _53 = GLSL.std.450::NMax(_52, _39);
+  float _40 = _34.y : [[RelaxedPrecision]];
+  float _41 = _53 - _40;
+  float _42 = _34.z : [[RelaxedPrecision]];
+  float _43 = GLSL.std.450::FClamp(_41, 0.0000, _42);
+  float _44 = _34.w : [[RelaxedPrecision]];
+  float _45 = _44 * _43;
+  float _46 = _45 * _43;
+  float _47 = _53 - _33;
+  float _48 = GLSL.std.450::NMax(_46, _47);
+  float _49 = GLSL.std.450::NMax(_53, 0.0001);
+  float _50 = _48 / _49;
+  float3 _51 = _178 * _50;
+  float* _181 = &amp;_5._child20.x;
+  float _182 = *_181;
+  float3 _183 = _51 * _182;
+  float _54 = Dot(_183, {0.2126, 0.7153, 0.0722}) : [[RelaxedPrecision]];
+  float _35 = _54 + 1.0000;
+  float _36 = 1.0000 / _35;
+  Image&lt;float, 2D&gt; _184 = *_9;
+  sampler _185 = *_7;
+  float2 _186 = {-0.9000, 0.4000} * _170;
+  float2 _187 = _164 + _186;
+  SampledImage&lt;float, 2D&gt; _188 = SampledImage(_184, _185);
+  float4 _189 = ImageSampleExplicitLod(_188, _187, Lod(0.0000));
+  float3 _190 = _189.xyz;
+  uint3 _191 = Bitcast(_190);
+  bool _192 = _191 &lt; {2139095040, 2139095040, 2139095040};
+  float3 _193 = Select(_192, _190, {0.0000, 0.0000, 0.0000});
+  float _57 = _193.x : [[RelaxedPrecision]];
+  float _58 = _193.y : [[RelaxedPrecision]];
+  float _59 = _193.z : [[RelaxedPrecision]];
+  float _69 = GLSL.std.450::NMax(_57, _58);
+  float _70 = GLSL.std.450::NMax(_69, _59);
+  float _60 = _70 - _40;
+  float _61 = GLSL.std.450::FClamp(_60, 0.0000, _42);
+  float _62 = _44 * _61;
+  float _63 = _62 * _61;
+  float _64 = _70 - _33;
+  float _65 = GLSL.std.450::NMax(_63, _64);
+  float _66 = GLSL.std.450::NMax(_70, 0.0001);
+  float _67 = _65 / _66;
+  float3 _68 = _193 * _67;
+  float3 _194 = _68 * _182;
+  float _71 = Dot(_194, {0.2126, 0.7153, 0.0722}) : [[RelaxedPrecision]];
+  float _55 = _71 + 1.0000;
+  float _56 = 1.0000 / _55;
+  Image&lt;float, 2D&gt; _195 = *_9;
+  sampler _196 = *_7;
+  float2 _197 = {0.4000, 0.9000} * _170;
+  float2 _198 = _164 + _197;
+  SampledImage&lt;float, 2D&gt; _199 = SampledImage(_195, _196);
+  float4 _200 = ImageSampleExplicitLod(_199, _198, Lod(0.0000));
+  float3 _201 = _200.xyz;
+  uint3 _202 = Bitcast(_201);
+  bool _203 = _202 &lt; {2139095040, 2139095040, 2139095040};
+  float3 _204 = Select(_203, _201, {0.0000, 0.0000, 0.0000});
+  float _74 = _204.x : [[RelaxedPrecision]];
+  float _75 = _204.y : [[RelaxedPrecision]];
+  float _76 = _204.z : [[RelaxedPrecision]];
+  float _86 = GLSL.std.450::NMax(_74, _75);
+  float _87 = GLSL.std.450::NMax(_86, _76);
+  float _77 = _87 - _40;
+  float _78 = GLSL.std.450::FClamp(_77, 0.0000, _42);
+  float _79 = _44 * _78;
+  float _80 = _79 * _78;
+  float _81 = _87 - _33;
+  float _82 = GLSL.std.450::NMax(_80, _81);
+  float _83 = GLSL.std.450::NMax(_87, 0.0001);
+  float _84 = _82 / _83;
+  float3 _85 = _204 * _84;
+  float3 _205 = _85 * _182;
+  float _88 = Dot(_205, {0.2126, 0.7153, 0.0722}) : [[RelaxedPrecision]];
+  float _72 = _88 + 1.0000;
+  float _73 = 1.0000 / _72;
+  Image&lt;float, 2D&gt; _206 = *_9;
+  sampler _207 = *_7;
+  float2 _208 = {-0.4000, -0.9000} * _170;
+  float2 _209 = _164 + _208;
+  SampledImage&lt;float, 2D&gt; _210 = SampledImage(_206, _207);
+  float4 _211 = ImageSampleExplicitLod(_210, _209, Lod(0.0000));
+  float3 _212 = _211.xyz;
+  uint3 _213 = Bitcast(_212);
+  bool _214 = _213 &lt; {2139095040, 2139095040, 2139095040};
+  float3 _215 = Select(_214, _212, {0.0000, 0.0000, 0.0000});
+  float _91 = _215.x : [[RelaxedPrecision]];
+  float _92 = _215.y : [[RelaxedPrecision]];
+  float _93 = _215.z : [[RelaxedPrecision]];
+  float _103 = GLSL.std.450::NMax(_91, _92);
+  float _104 = GLSL.std.450::NMax(_103, _93);
+  float _94 = _104 - _40;
+  float _95 = GLSL.std.450::FClamp(_94, 0.0000, _42);
+  float _96 = _44 * _95;
+  float _97 = _96 * _95;
+  float _98 = _104 - _33;
+  float _99 = GLSL.std.450::NMax(_97, _98);
+  float _100 = GLSL.std.450::NMax(_104, 0.0001);
+  float _101 = _99 / _100;
+  float3 _102 = _215 * _101;
+  float3 _216 = _102 * _182;
+  float _105 = Dot(_216, {0.2126, 0.7153, 0.0722}) : [[RelaxedPrecision]];
+  float _89 = _105 + 1.0000;
+  float _90 = 1.0000 / _89;
+  float _19 = _36 + _56;
+  float _20 = _19 + _73;
+  float _21 = _20 + _90;
+  float3 _22 = _183 * _36;
+  float3 _23 = _194 * _56;
+  float3 _24 = _205 * _73;
+  float3 _25 = _216 * _90;
+  float3 _26 = _22 + _23;
+  float3 _27 = _26 + _24;
+  float3 _28 = _27 + _25;
+  float3 _29 = CompositeConstruct({_21, _21, _21}) : [[RelaxedPrecision]];
+  float3 _30 = _28 / _29;
+  float2 _217 = _161.xy;
+  uint2 _218 = ConvertFToU(_217);
+  bool _219 = _158 &lt;= _218;
+  bool _220 = All(_219);
+  float _31 = Select(_220, 1.0000, 0.0000) : [[RelaxedPrecision]];
+  float3 _32 = _30 * _31;
+  StorageImage&lt;float, 2D&gt; _221 = *_11;
+  ImageWrite(_221, _165, _32, );
+  return;
+}
+</pre>
+
+<h2 id="s2">② 降采样高斯（共享内存融合 H+V）—— CS ResourceId::126528 @ E5267/E5291（金字塔中间级）</h2>
+<div class="note green">
+  <b>要点定位：</b>三个 <code>Workgroup uint[128]</code> 共享内存数组（RGB 各一）；加载阶段每线程 4 采样（2×2 块）并 <code>PackHalf2x16</code> 打包入共享内存；两次 <code>ControlBarrier(Workgroup, Workgroup, AcquireRelease | WorkgroupMemory)</code> 分隔水平/垂直模糊；高斯权重 <code>0.2734/0.2188/0.1094/0.0313/0.0039</code> = 二项式系数 [70,56,28,8,1]/256；边界由末尾 <code>_338 &lt; _435</code> 钳制后 <code>ImageWrite</code>。
+</div>
+<pre>SPIR-V 1.3 module, &lt;id&gt; bound of 441
+
+Generator: spiregg from Google - Contact Steven Perron, stevenperron@google.com
+Generator Version: 0
+
+Capability(Shader);
+Capability(StorageImageExtendedFormats);
+
+
+
+MemoryModel(Logical, GLSL450);
+
+EntryPoint(GLCompute, _2, "main", {
+    _3,
+    _4,
+    _5
+  });
+
+ExecutionMode(_2, LocalSize(8, 8, 1));
+
+
+
+
+struct _12 : [[Block]] {
+  float4 _child0 : [[Offset(0)]];
+}
+UniformConstant sampler* _7 : [[DescriptorSet(0), Binding(2)]];
+UniformConstant Image&lt;float, 2D&gt;* _9 : [[DescriptorSet(0), Binding(1)]];
+UniformConstant StorageImage&lt;float, 2D&gt;* _11 : [[DescriptorSet(0), Binding(0)]];
+Uniform struct12* _13 : [[DescriptorSet(1), Binding(0)]];
+Workgroup uint[128]* _14;
+Workgroup uint[128]* _15;
+Workgroup uint[128]* _16;
+Input uint3* _3 : [[BuiltIn(WorkgroupId)]];
+Input uint3* _4 : [[BuiltIn(LocalInvocationId)]];
+Input uint3* _5 : [[BuiltIn(GlobalInvocationId)]];
+
+void _2() {
+  uint3 _72 = *_3;
+  uint2 _73 = _72.xy;
+  uint3 _74 = *_4;
+  uint2 _75 = _74.xy;
+  uint3 _76 = *_5;
+  uint2 _77 = _75 &lt;&lt; {1, 1};
+  uint2 _78 = _73 &lt;&lt; {3, 3};
+  uint2 _79 = _77 + _78;
+  uint2 _80 = _79 - {4, 4};
+  int2 _81 = Bitcast(_80);
+  float2 _82 = ConvertSToF(_81);
+  float2 _83 = _82 + {0.5000, 0.5000};
+  Image&lt;float, 2D&gt; _84 = *_9;
+  sampler _85 = *_7;
+  float4* _86 = &amp;_13._child0;
+  float4 _87 = *_86;
+  float2 _88 = _87.zw;
+  float2 _89 = _83 * _88;
+  SampledImage&lt;float, 2D&gt; _90 = SampledImage(_84, _85);
+  float4 _91 = ImageSampleExplicitLod(_90, _89, Lod(0.0000));
+  Image&lt;float, 2D&gt; _92 = *_9;
+  sampler _93 = *_7;
+  float2 _94 = _82 + {1.5000, 0.5000};
+  float2 _95 = _94 * _88;
+  SampledImage&lt;float, 2D&gt; _96 = SampledImage(_92, _93);
+  float4 _97 = ImageSampleExplicitLod(_96, _95, Lod(0.0000));
+  Image&lt;float, 2D&gt; _98 = *_9;
+  sampler _99 = *_7;
+  float2 _100 = _82 + {0.5000, 1.5000};
+  float2 _101 = _100 * _88;
+  SampledImage&lt;float, 2D&gt; _102 = SampledImage(_98, _99);
+  float4 _103 = ImageSampleExplicitLod(_102, _101, Lod(0.0000));
+  Image&lt;float, 2D&gt; _104 = *_9;
+  sampler _105 = *_7;
+  float2 _106 = _82 + {1.5000, 1.5000};
+  float2 _107 = _106 * _88;
+  SampledImage&lt;float, 2D&gt; _108 = SampledImage(_104, _105);
+  float4 _109 = ImageSampleExplicitLod(_108, _107, Lod(0.0000));
+  uint _110 = _74.x;
+  uint _111 = _74.y;
+  uint _112 = _111 &lt;&lt; 4;
+  uint _113 = _110 + _112;
+  float _114 = _91.x;
+  float2 _115 = CompositeConstruct({_114, 0.0000});
+  uint _116 = GLSL.std.450::PackHalf2x16(_115);
+  float _117 = _97.x;
+  float2 _118 = CompositeConstruct({_117, 0.0000});
+  uint _119 = GLSL.std.450::PackHalf2x16(_118);
+  uint _120 = _119 &lt;&lt; 16;
+  uint _121 = _116 | _120;
+  uint* _122 = &amp;_14[_113];
+  *_122 = _121;
+  float _123 = _91.y;
+  float2 _124 = CompositeConstruct({_123, 0.0000});
+  uint _125 = GLSL.std.450::PackHalf2x16(_124);
+  float _126 = _97.y;
+  float2 _127 = CompositeConstruct({_126, 0.0000});
+  uint _128 = GLSL.std.450::PackHalf2x16(_127);
+  uint _129 = _128 &lt;&lt; 16;
+  uint _130 = _125 | _129;
+  uint* _131 = &amp;_15[_113];
+  *_131 = _130;
+  float _132 = _91.z;
+  float2 _133 = CompositeConstruct({_132, 0.0000});
+  uint _134 = GLSL.std.450::PackHalf2x16(_133);
+  float _135 = _97.z;
+  float2 _136 = CompositeConstruct({_135, 0.0000});
+  uint _137 = GLSL.std.450::PackHalf2x16(_136);
+  uint _138 = _137 &lt;&lt; 16;
+  uint _139 = _134 | _138;
+  uint* _140 = &amp;_16[_113];
+  *_140 = _139;
+  uint _141 = _113 + 8;
+  float _142 = _103.x;
+  float2 _143 = CompositeConstruct({_142, 0.0000});
+  uint _144 = GLSL.std.450::PackHalf2x16(_143);
+  float _145 = _109.x;
+  float2 _146 = CompositeConstruct({_145, 0.0000});
+  uint _147 = GLSL.std.450::PackHalf2x16(_146);
+  uint _148 = _147 &lt;&lt; 16;
+  uint _149 = _144 | _148;
+  uint* _150 = &amp;_14[_141];
+  *_150 = _149;
+  float _151 = _103.y;
+  float2 _152 = CompositeConstruct({_151, 0.0000});
+  uint _153 = GLSL.std.450::PackHalf2x16(_152);
+  float _154 = _109.y;
+  float2 _155 = CompositeConstruct({_154, 0.0000});
+  uint _156 = GLSL.std.450::PackHalf2x16(_155);
+  uint _157 = _156 &lt;&lt; 16;
+  uint _158 = _153 | _157;
+  uint* _159 = &amp;_15[_141];
+  *_159 = _158;
+  float _160 = _103.z;
+  float2 _161 = CompositeConstruct({_160, 0.0000});
+  uint _162 = GLSL.std.450::PackHalf2x16(_161);
+  float _163 = _109.z;
+  float2 _164 = CompositeConstruct({_163, 0.0000});
+  uint _165 = GLSL.std.450::PackHalf2x16(_164);
+  uint _166 = _165 &lt;&lt; 16;
+  uint _167 = _162 | _166;
+  uint* _168 = &amp;_16[_141];
+  *_168 = _167;
+  ControlBarrier(Workgroup, Workgroup, AcquireRelease | WorkgroupMemory);
+  uint _169 = _110 &lt;&lt; 1;
+  uint _170 = _112 + _169;
+  uint _171 = _112 + _110;
+  uint _172 = _110 &amp; 4;
+  uint _173 = _171 + _172;
+  uint* _174 = &amp;_14[_173];
+  uint _175 = *_174;
+  uint* _176 = &amp;_15[_173];
+  uint _177 = *_176;
+  uint* _178 = &amp;_16[_173];
+  uint _179 = *_178;
+  float2 _180 = GLSL.std.450::UnpackHalf2x16(_175);
+  float _181 = _180.x;
+  float2 _182 = GLSL.std.450::UnpackHalf2x16(_177);
+  float _183 = _182.x;
+  float2 _184 = GLSL.std.450::UnpackHalf2x16(_179);
+  float _185 = _184.x;
+  float3 _186 = CompositeConstruct({_181, _183, _185});
+  uint _187 = _175 &gt;&gt; 16;
+  float2 _188 = GLSL.std.450::UnpackHalf2x16(_187);
+  float _189 = _188.x;
+  uint _190 = _177 &gt;&gt; 16;
+  float2 _191 = GLSL.std.450::UnpackHalf2x16(_190);
+  float _192 = _191.x;
+  uint _193 = _179 &gt;&gt; 16;
+  float2 _194 = GLSL.std.450::UnpackHalf2x16(_193);
+  float _195 = _194.x;
+  float3 _196 = CompositeConstruct({_189, _192, _195});
+  uint _197 = _173 + 1;
+  uint* _198 = &amp;_14[_197];
+  uint _199 = *_198;
+  uint* _200 = &amp;_15[_197];
+  uint _201 = *_200;
+  uint* _202 = &amp;_16[_197];
+  uint _203 = *_202;
+  float2 _204 = GLSL.std.450::UnpackHalf2x16(_199);
+  float _205 = _204.x;
+  float2 _206 = GLSL.std.450::UnpackHalf2x16(_201);
+  float _207 = _206.x;
+  float2 _208 = GLSL.std.450::UnpackHalf2x16(_203);
+  float _209 = _208.x;
+  float3 _210 = CompositeConstruct({_205, _207, _209});
+  uint _211 = _199 &gt;&gt; 16;
+  float2 _212 = GLSL.std.450::UnpackHalf2x16(_211);
+  float _213 = _212.x;
+  uint _214 = _201 &gt;&gt; 16;
+  float2 _215 = GLSL.std.450::UnpackHalf2x16(_214);
+  float _216 = _215.x;
+  uint _217 = _203 &gt;&gt; 16;
+  float2 _218 = GLSL.std.450::UnpackHalf2x16(_217);
+  float _219 = _218.x;
+  float3 _220 = CompositeConstruct({_213, _216, _219});
+  uint _221 = _173 + 2;
+  uint* _222 = &amp;_14[_221];
+  uint _223 = *_222;
+  uint* _224 = &amp;_15[_221];
+  uint _225 = *_224;
+  uint* _226 = &amp;_16[_221];
+  uint _227 = *_226;
+  float2 _228 = GLSL.std.450::UnpackHalf2x16(_223);
+  float _229 = _228.x;
+  float2 _230 = GLSL.std.450::UnpackHalf2x16(_225);
+  float _231 = _230.x;
+  float2 _232 = GLSL.std.450::UnpackHalf2x16(_227);
+  float _233 = _232.x;
+  float3 _234 = CompositeConstruct({_229, _231, _233});
+  uint _235 = _223 &gt;&gt; 16;
+  float2 _236 = GLSL.std.450::UnpackHalf2x16(_235);
+  float _237 = _236.x;
+  uint _238 = _225 &gt;&gt; 16;
+  float2 _239 = GLSL.std.450::UnpackHalf2x16(_238);
+  float _240 = _239.x;
+  uint _241 = _227 &gt;&gt; 16;
+  float2 _242 = GLSL.std.450::UnpackHalf2x16(_241);
+  float _243 = _242.x;
+  float3 _244 = CompositeConstruct({_237, _240, _243});
+  uint _245 = _173 + 3;
+  uint* _246 = &amp;_14[_245];
+  uint _247 = *_246;
+  uint* _248 = &amp;_15[_245];
+  uint _249 = *_248;
+  uint* _250 = &amp;_16[_245];
+  uint _251 = *_250;
+  float2 _252 = GLSL.std.450::UnpackHalf2x16(_247);
+  float _253 = _252.x;
+  float2 _254 = GLSL.std.450::UnpackHalf2x16(_249);
+  float _255 = _254.x;
+  float2 _256 = GLSL.std.450::UnpackHalf2x16(_251);
+  float _257 = _256.x;
+  float3 _258 = CompositeConstruct({_253, _255, _257});
+  uint _259 = _247 &gt;&gt; 16;
+  float2 _260 = GLSL.std.450::UnpackHalf2x16(_259);
+  float _261 = _260.x;
+  uint _262 = _249 &gt;&gt; 16;
+  float2 _263 = GLSL.std.450::UnpackHalf2x16(_262);
+  float _264 = _263.x;
+  uint _265 = _251 &gt;&gt; 16;
+  float2 _266 = GLSL.std.450::UnpackHalf2x16(_265);
+  float _267 = _266.x;
+  float3 _268 = CompositeConstruct({_261, _264, _267});
+  uint _269 = _173 + 4;
+  uint* _270 = &amp;_14[_269];
+  uint _271 = *_270;
+  uint* _272 = &amp;_15[_269];
+  uint _273 = *_272;
+  uint* _274 = &amp;_16[_269];
+  uint _275 = *_274;
+  float2 _276 = GLSL.std.450::UnpackHalf2x16(_271);
+  float _277 = _276.x;
+  float2 _278 = GLSL.std.450::UnpackHalf2x16(_273);
+  float _279 = _278.x;
+  float2 _280 = GLSL.std.450::UnpackHalf2x16(_275);
+  float _281 = _280.x;
+  float3 _282 = CompositeConstruct({_277, _279, _281});
+  uint _283 = _271 &gt;&gt; 16;
+  float2 _284 = GLSL.std.450::UnpackHalf2x16(_283);
+  float _285 = _284.x;
+  uint _286 = _273 &gt;&gt; 16;
+  float2 _287 = GLSL.std.450::UnpackHalf2x16(_286);
+  float _288 = _287.x;
+  uint _289 = _275 &gt;&gt; 16;
+  float2 _290 = GLSL.std.450::UnpackHalf2x16(_289);
+  float _291 = _290.x;
+  float3 _292 = CompositeConstruct({_285, _288, _291});
+  float3 _293 = _234 * 0.2734;
+  float3 _294 = _220 + _244;
+  float3 _295 = _294 * 0.2188;
+  float3 _296 = _293 + _295;
+  float3 _297 = _210 + _258;
+  float3 _298 = _297 * 0.1094;
+  float3 _299 = _296 + _298;
+  float3 _300 = _196 + _268;
+  float3 _301 = _300 * 0.0313;
+  float3 _302 = _299 + _301;
+  float3 _303 = _186 + _282;
+  float3 _304 = _303 * 0.0039;
+  float3 _305 = _302 + _304;
+  float _306 = _305.x;
+  uint _307 = Bitcast(_306);
+  uint* _308 = &amp;_14[_170];
+  *_308 = _307;
+  float _309 = _305.y;
+  uint _310 = Bitcast(_309);
+  uint* _311 = &amp;_15[_170];
+  *_311 = _310;
+  float _312 = _305.z;
+  uint _313 = Bitcast(_312);
+  uint* _314 = &amp;_16[_170];
+  *_314 = _313;
+  uint _315 = _170 + 1;
+  float3 _316 = _244 * 0.2734;
+  float3 _317 = _234 + _258;
+  float3 _318 = _317 * 0.2188;
+  float3 _319 = _316 + _318;
+  float3 _320 = _220 + _268;
+  float3 _321 = _320 * 0.1094;
+  float3 _322 = _319 + _321;
+  float3 _323 = _210 + _282;
+  float3 _324 = _323 * 0.0313;
+  float3 _325 = _322 + _324;
+  float3 _326 = _196 + _292;
+  float3 _327 = _326 * 0.0039;
+  float3 _328 = _325 + _327;
+  float _329 = _328.x;
+  uint _330 = Bitcast(_329);
+  uint* _331 = &amp;_14[_315];
+  *_331 = _330;
+  float _332 = _328.y;
+  uint _333 = Bitcast(_332);
+  uint* _334 = &amp;_15[_315];
+  *_334 = _333;
+  float _335 = _328.z;
+  uint _336 = Bitcast(_335);
+  uint* _337 = &amp;_16[_315];
+  *_337 = _336;
+  ControlBarrier(Workgroup, Workgroup, AcquireRelease | WorkgroupMemory);
+  uint2 _338 = _76.xy;
+  uint _339 = _111 &lt;&lt; 3;
+  uint _340 = _339 + _110;
+  uint* _341 = &amp;_14[_340];
+  uint _342 = *_341;
+  uint* _343 = &amp;_15[_340];
+  uint _344 = *_343;
+  uint* _345 = &amp;_16[_340];
+  uint _346 = *_345;
+  uint3 _347 = CompositeConstruct({_342, _344, _346});
+  float3 _348 = Bitcast(_347);
+  uint _349 = _340 + 8;
+  uint* _350 = &amp;_14[_349];
+  uint _351 = *_350;
+  uint* _352 = &amp;_15[_349];
+  uint _353 = *_352;
+  uint* _354 = &amp;_16[_349];
+  uint _355 = *_354;
+  uint3 _356 = CompositeConstruct({_351, _353, _355});
+  float3 _357 = Bitcast(_356);
+  uint _358 = _340 + 16;
+  uint* _359 = &amp;_14[_358];
+  uint _360 = *_359;
+  uint* _361 = &amp;_15[_358];
+  uint _362 = *_361;
+  uint* _363 = &amp;_16[_358];
+  uint _364 = *_363;
+  uint3 _365 = CompositeConstruct({_360, _362, _364});
+  float3 _366 = Bitcast(_365);
+  uint _367 = _340 + 24;
+  uint* _368 = &amp;_14[_367];
+  uint _369 = *_368;
+  uint* _370 = &amp;_15[_367];
+  uint _371 = *_370;
+  uint* _372 = &amp;_16[_367];
+  uint _373 = *_372;
+  uint3 _374 = CompositeConstruct({_369, _371, _373});
+  float3 _375 = Bitcast(_374);
+  uint _376 = _340 + 32;
+  uint* _377 = &amp;_14[_376];
+  uint _378 = *_377;
+  uint* _379 = &amp;_15[_376];
+  uint _380 = *_379;
+  uint* _381 = &amp;_16[_376];
+  uint _382 = *_381;
+  uint3 _383 = CompositeConstruct({_378, _380, _382});
+  float3 _384 = Bitcast(_383);
+  uint _385 = _340 + 40;
+  uint* _386 = &amp;_14[_385];
+  uint _387 = *_386;
+  uint* _388 = &amp;_15[_385];
+  uint _389 = *_388;
+  uint* _390 = &amp;_16[_385];
+  uint _391 = *_390;
+  uint3 _392 = CompositeConstruct({_387, _389, _391});
+  float3 _393 = Bitcast(_392);
+  uint _394 = _340 + 48;
+  uint* _395 = &amp;_14[_394];
+  uint _396 = *_395;
+  uint* _397 = &amp;_15[_394];
+  uint _398 = *_397;
+  uint* _399 = &amp;_16[_394];
+  uint _400 = *_399;
+  uint3 _401 = CompositeConstruct({_396, _398, _400});
+  float3 _402 = Bitcast(_401);
+  uint _403 = _340 + 56;
+  uint* _404 = &amp;_14[_403];
+  uint _405 = *_404;
+  uint* _406 = &amp;_15[_403];
+  uint _407 = *_406;
+  uint* _408 = &amp;_16[_403];
+  uint _409 = *_408;
+  uint3 _410 = CompositeConstruct({_405, _407, _409});
+  float3 _411 = Bitcast(_410);
+  uint _412 = _340 + 64;
+  uint* _413 = &amp;_14[_412];
+  uint _414 = *_413;
+  uint* _415 = &amp;_15[_412];
+  uint _416 = *_415;
+  uint* _417 = &amp;_16[_412];
+  uint _418 = *_417;
+  uint3 _419 = CompositeConstruct({_414, _416, _418});
+  float3 _420 = Bitcast(_419);
+  float3 _421 = _384 * 0.2734;
+  float3 _422 = _375 + _393;
+  float3 _423 = _422 * 0.2188;
+  float3 _424 = _421 + _423;
+  float3 _425 = _366 + _402;
+  float3 _426 = _425 * 0.1094;
+  float3 _427 = _424 + _426;
+  float3 _428 = _357 + _411;
+  float3 _429 = _428 * 0.0313;
+  float3 _430 = _427 + _429;
+  float3 _431 = _348 + _420;
+  float3 _432 = _431 * 0.0039;
+  float3 _433 = _430 + _432;
+  float2 _434 = _87.xy;
+  uint2 _435 = ConvertFToU(_434);
+  bool _436 = _338 &lt; _435;
+  bool _437 = All(_436);
+  float _438 = Select(_437, 1.0000, 0.0000);
+  float3 _439 = _433 * _438;
+  StorageImage&lt;float, 2D&gt; _440 = *_11;
+  ImageWrite(_440, _338, _439, );
+  return;
+}
+</pre>
+
+<h2 id="s3">③ 金字塔混合 Upsample-Blend —— CS ResourceId::126533 @ E5319（链尾）</h2>
+<div class="note green">
+  <b>要点定位：</b><code>ImageFetch</code>（低级金字塔，整数坐标）+ <code>ImageSample</code>（高级，归一化 UV）→ <code>FMix(a, b, intensity)</code> → <code>ImageWrite</code>。48B 常量块（_child2.xy=输出尺寸, .zw=UV 缩放；_child0.x=混合强度）。
+</div>
+<pre>SPIR-V 1.3 module, &lt;id&gt; bound of 81
+
+Generator: spiregg from Google - Contact Steven Perron, stevenperron@google.com
+Generator Version: 0
+
+Capability(Shader);
+Capability(StorageImageExtendedFormats);
+
+
+
+MemoryModel(Logical, GLSL450);
+
+EntryPoint(GLCompute, _2, "main", {
+    _3
+  });
+
+ExecutionMode(_2, LocalSize(8, 8, 1));
+
+
+
+
+struct _11 : [[Block]] {
+  float4 _child0 : [[Offset(0)]];
+  float4 _child1 : [[Offset(16)]];
+  float4 _child2 : [[Offset(32)]];
+}
+UniformConstant sampler* _5 : [[DescriptorSet(0), Binding(3)]];
+UniformConstant Image&lt;float, 2D&gt;* _7 : [[DescriptorSet(0), Binding(1)]];
+UniformConstant Image&lt;float, 2D&gt;* _8 : [[DescriptorSet(0), Binding(2)]];
+UniformConstant StorageImage&lt;float, 2D&gt;* _10 : [[DescriptorSet(0), Binding(0)]];
+Uniform struct11* _12 : [[DescriptorSet(1), Binding(0)]];
+Input uint3* _3 : [[BuiltIn(GlobalInvocationId)]];
+
+void _2() {
+  uint3 _44 = *_3;
+  uint2 _45 = _44.xy;
+  float2 _46 = ConvertUToF(_45);
+  float4* _47 = &amp;_12._child2;
+  float4 _48 = *_47;
+  float2 _49 = _48.zw;
+  float2 _50 = _46 + {0.5000, 0.5000};
+  float2 _51 = _50 * _49;
+  uint2 _52 = ConvertFToU(_46);
+  float2 _53 = ConvertUToF(_52);
+  float2 _54 = _48.xy;
+  float2 _55 = _54 - {1.0000, 1.0000};
+  float2 _56 = GLSL.std.450::FClamp(_53, {0.0000, 0.0000}, _55);
+  float _57 = _56.x;
+  float _58 = _56.y;
+  int _59 = ConvertFToS(_57);
+  int _60 = ConvertFToS(_58);
+  int3 _61 = CompositeConstruct({_59, _60, 0});
+  int2 _62 = _61.xy;
+  Image&lt;float, 2D&gt; _63 = *_8;
+  float4 _64 = ImageFetch(_63, _62, Lod(0));
+  float3 _65 = _64.xyz;
+  Image&lt;float, 2D&gt; _66 = *_7;
+  sampler _67 = *_5;
+  SampledImage&lt;float, 2D&gt; _68 = SampledImage(_66, _67);
+  float4 _69 = ImageSampleExplicitLod(_68, _51, Lod(0.0000));
+  float3 _70 = _69.xyz;
+  float* _71 = &amp;_12._child0.x;
+  float _72 = *_71;
+  float3 _73 = CompositeConstruct({_72, _72, _72});
+  float3 _74 = GLSL.std.450::FMix(_65, _70, _73);
+  uint2 _75 = ConvertFToU(_54);
+  bool _76 = _45 &lt;= _75;
+  bool _77 = All(_76);
+  float _78 = Select(_77, 1.0000, 0.0000);
+  float3 _79 = _74 * _78;
+  StorageImage&lt;float, 2D&gt; _80 = *_10;
+  ImageWrite(_80, _45, _79, );
+  return;
+}
+</pre>
+
+<h2 id="s4">④ 最终合成中的 Bloom 叠加 —— PS ResourceId::126537 @ E5327（Colour Pass #16）</h2>
+<div class="note green">
+  <b>要点定位（Bloom 相关部分）：</b>Binding 4 采样 Bloom 金字塔末端纹理，<code>maxc = NMax(r,g,b)</code> 后走与亮部提取同族的 <code>maxc−threshold → clamp → knee² </code> 软阈值曲线（第 _69–_79 段），乘 <code>intensity(_23)</code> 后叠加到场景色 <code>_34 = _220 − _33</code>。同着色器还含：4 邻域锐化（±0.1 限幅）、vignette 幂次衰减、LogC LUT 调色（<code>Log2×0.3010</code> → 2D tile 双切片插值）、sRGB 编码（12.9219/1.0547/0.0550/0.4167/0.0031）、胶片颗粒（<code>dot(uv,{171,231})</code> 哈希抖动）。
+</div>
+<pre>SPIR-V 1.0 module, &lt;id&gt; bound of 329
+
+Generator: spiregg from Google - Contact Steven Perron, stevenperron@google.com
+Generator Version: 0
+
+Capability(Shader);
+
+
+
+MemoryModel(Logical, GLSL450);
+
+EntryPoint(Fragment, _2, "main", {
+    _3,
+    _4
+  });
+
+ExecutionMode(_2, OriginUpperLeft);
+
+
+
+
+struct _5 : [[Block]] {
+  float4 _child0 : [[Offset(0)]];
+  float4 _child1 : [[Offset(16)]];
+  float4 _child2 : [[Offset(32)]];
+  float4 _child3 : [[Offset(48)]];
+  float4 _child4 : [[Offset(64)]];
+  float4 _child5 : [[Offset(80)]];
+  [6] _child6 : [[Offset(96)]] : [[ArrayStride(16)]];
+  [6] _child7 : [[Offset(192)]] : [[ArrayStride(16)]];
+  float4 _child8 : [[Offset(288)]];
+  float4 _child9 : [[Offset(304)]];
+  float4 _child10 : [[Offset(320)]];
+  float4 _child11 : [[Offset(336)]];
+  float4 _child12 : [[Offset(352)]];
+  float4 _child13 : [[Offset(368)]];
+  float4 _child14 : [[Offset(384)]];
+  float4 _child15 : [[Offset(400)]];
+  float _child16 : [[Offset(416)]];
+  float _child17 : [[Offset(420)]];
+  float _child18 : [[Offset(424)]];
+  uint _child19 : [[Offset(428)]];
+  float4 _child20 : [[Offset(432)]];
+  int4 _child21 : [[Offset(448)]];
+  float4 _child22 : [[Offset(464), RelaxedPrecision]];
+  float4 _child23 : [[Offset(480), RelaxedPrecision]];
+  float4 _child24 : [[Offset(496), RelaxedPrecision]];
+  float4 _child25 : [[Offset(512)]];
+  float4 _child26 : [[Offset(528)]];
+  float4 _child27 : [[Offset(544)]];
+  float4 _child28 : [[Offset(560)]];
+  float4 _child29 : [[Offset(576)]];
+  float4 _child30 : [[Offset(592)]];
+  float4 _child31 : [[Offset(608)]];
+  [4] _child32 : [[Offset(624)]] : [[ArrayStride(16)]];
+  [4] _child33 : [[Offset(688)]] : [[ArrayStride(16)]];
+  [4] _child34 : [[Offset(752)]] : [[ArrayStride(16)]];
+  [4] _child35 : [[Offset(816)]] : [[ArrayStride(16)]];
+  float4 _child36 : [[Offset(880)]];
+  float4 _child37 : [[Offset(896)]];
+  [4] _child38 : [[Offset(912)]] : [[ArrayStride(16)]];
+  [4] _child39 : [[Offset(976)]] : [[ArrayStride(16)]];
+  [4] _child40 : [[Offset(1040)]] : [[ArrayStride(16)]];
+  float4 _child41 : [[Offset(1104)]];
+  float4 _child42 : [[Offset(1120)]];
+  float4 _child43 : [[Offset(1136), RelaxedPrecision]];
+  float4 _child44 : [[Offset(1152), RelaxedPrecision]];
+  float4 _child45 : [[Offset(1168), RelaxedPrecision]];
+  float4 _child46 : [[Offset(1184), RelaxedPrecision]];
+  float4 _child47 : [[Offset(1200), RelaxedPrecision]];
+  float4 _child48 : [[Offset(1216), RelaxedPrecision]];
+  float4 _child49 : [[Offset(1232)]];
+  float4 _child50 : [[Offset(1248)]];
+  float4 _child51 : [[Offset(1264), RelaxedPrecision]];
+  float4 _child52 : [[Offset(1280)]];
+  float4 _child53 : [[Offset(1296)]];
+  float4 _child54 : [[Offset(1312)]];
+  float4 _child55 : [[Offset(1328)]];
+  float4 _child56 : [[Offset(1344)]];
+  float4 _child57 : [[Offset(1360)]];
+  float4 _child58 : [[Offset(1376)]];
+  float4 _child59 : [[Offset(1392)]];
+  float4 _child60 : [[Offset(1408)]];
+  float4 _child61 : [[Offset(1424)]];
+  float4 _child62 : [[Offset(1440)]];
+  float4 _child63 : [[Offset(1456)]];
+  float4 _child64 : [[Offset(1472)]];
+  float4 _child65 : [[Offset(1488)]];
+  float4 _child66 : [[Offset(1504)]];
+  float4 _child67 : [[Offset(1520)]];
+  float4 _child68 : [[Offset(1536)]];
+  float4 _child69 : [[Offset(1552), RelaxedPrecision]];
+  float4 _child70 : [[Offset(1568), RelaxedPrecision]];
+  float4 _child71 : [[Offset(1584), RelaxedPrecision]];
+  float4 _child72 : [[Offset(1600), RelaxedPrecision]];
+  float4 _child73 : [[Offset(1616), RelaxedPrecision]];
+  float4 _child74 : [[Offset(1632), RelaxedPrecision]];
+  float4 _child75 : [[Offset(1648)]];
+  float4 _child76 : [[Offset(1664)]];
+  float4 _child77 : [[Offset(1680)]];
+  float4 _child78 : [[Offset(1696)]];
+  float4 _child79 : [[Offset(1712), RelaxedPrecision]];
+  float4 _child80 : [[Offset(1728), RelaxedPrecision]];
+  float4 _child81 : [[Offset(1744), RelaxedPrecision]];
+  float4 _child82 : [[Offset(1760), RelaxedPrecision]];
+  float4 _child83 : [[Offset(1776), RelaxedPrecision]];
+  float4 _child84 : [[Offset(1792), RelaxedPrecision]];
+  float4 _child85 : [[Offset(1808), RelaxedPrecision]];
+  float4 _child86 : [[Offset(1824), RelaxedPrecision]];
+  float4 _child87 : [[Offset(1840), RelaxedPrecision]];
+  float4 _child88 : [[Offset(1856), RelaxedPrecision]];
+  float4 _child89 : [[Offset(1872)]];
+  float4 _child90 : [[Offset(1888), RelaxedPrecision]];
+  float4 _child91 : [[Offset(1904), RelaxedPrecision]];
+  float4 _child92 : [[Offset(1920), RelaxedPrecision]];
+  float4 _child93 : [[Offset(1936), RelaxedPrecision]];
+  float4 _child94 : [[Offset(1952), RelaxedPrecision]];
+  float4 _child95 : [[Offset(1968), RelaxedPrecision]];
+  float4 _child96 : [[Offset(1984)]];
+  float4 _child97 : [[Offset(2000)]];
+  float4 _child98 : [[Offset(2016)]];
+  [2] _child99 : [[Offset(2032)]] : [[ArrayStride(16)]];
+  [2] _child100 : [[Offset(2064)]] : [[ArrayStride(16)]];
+  float _child101 : [[Offset(2096)]];
+  float _child102 : [[Offset(2100)]];
+  float _child103 : [[Offset(2104)]];
+  float _child104 : [[Offset(2108)]];
+  float4 _child105 : [[Offset(2112)]];
+  float4 _child106 : [[Offset(2128)]];
+  float4 _child107 : [[Offset(2144), RelaxedPrecision]];
+  float4 _child108 : [[Offset(2160), RelaxedPrecision]];
+  float4 _child109 : [[Offset(2176), RelaxedPrecision]];
+  float4 _child110 : [[Offset(2192), RelaxedPrecision]];
+  float4 _child111 : [[Offset(2208)]];
+  float4 _child112 : [[Offset(2224), RelaxedPrecision]];
+  float4 _child113 : [[Offset(2240)]];
+  float4 _child114 : [[Offset(2256), RelaxedPrecision]];
+  float4 _child115 : [[Offset(2272)]];
+  float4 _child116 : [[Offset(2288)]];
+  float4 _child117 : [[Offset(2304)]];
+  float4 _child118 : [[Offset(2320)]];
+  float4 _child119 : [[Offset(2336)]];
+  float4 _child120 : [[Offset(2352)]];
+  float4 _child121 : [[Offset(2368), RelaxedPrecision]];
+  float4 _child122 : [[Offset(2384)]];
+  float4 _child123 : [[Offset(2400), RelaxedPrecision]];
+  float4 _child124 : [[Offset(2416), RelaxedPrecision]];
+  float4 _child125 : [[Offset(2432), RelaxedPrecision]];
+  float4 _child126 : [[Offset(2448), RelaxedPrecision]];
+  float4 _child127 : [[Offset(2464), RelaxedPrecision]];
+  float4 _child128 : [[Offset(2480)]];
+  float4 _child129 : [[Offset(2496), RelaxedPrecision]];
+  float4 _child130 : [[Offset(2512), RelaxedPrecision]];
+  float4 _child131 : [[Offset(2528), RelaxedPrecision]];
+  float4 _child132 : [[Offset(2544), RelaxedPrecision]];
+  float4 _child133 : [[Offset(2560), RelaxedPrecision]];
+  float4 _child134 : [[Offset(2576), RelaxedPrecision]];
+  float4x4 _child135 : [[RowMajor, MatrixStride(16), Offset(2592)]];
+  float4 _child136 : [[Offset(2656)]];
+  float4 _child137 : [[Offset(2672)]];
+  [32] _child138 : [[Offset(2688)]] : [[ArrayStride(16)]];
+}
+struct _13 : [[Block]] {
+  float4 _child0 : [[Offset(0), RelaxedPrecision]];
+  float4 _child1 : [[Offset(16), RelaxedPrecision]];
+  float4 _child2 : [[Offset(32), RelaxedPrecision]];
+  float4 _child3 : [[Offset(48), RelaxedPrecision]];
+  float4 _child4 : [[Offset(64), RelaxedPrecision]];
+  float4 _child5 : [[Offset(80), RelaxedPrecision]];
+  float4 _child6 : [[Offset(96), RelaxedPrecision]];
+  float4 _child7 : [[Offset(112), RelaxedPrecision]];
+  float4 _child8 : [[Offset(128), RelaxedPrecision]];
+  float4 _child9 : [[Offset(144), RelaxedPrecision]];
+  float4 _child10 : [[Offset(160), RelaxedPrecision]];
+  float4 _child11 : [[Offset(176), RelaxedPrecision]];
+  float4 _child12 : [[Offset(192)]];
+  float4 _child13 : [[Offset(208)]];
+  float4 _child14 : [[Offset(224)]];
+  float4 _child15 : [[Offset(240)]];
+  float4 _child16 : [[Offset(256), RelaxedPrecision]];
+  float4 _child17 : [[Offset(272), RelaxedPrecision]];
+  float4 _child18 : [[Offset(288), RelaxedPrecision]];
+  float4 _child19 : [[Offset(304), RelaxedPrecision]];
+  float4 _child20 : [[Offset(320), RelaxedPrecision]];
+  float4 _child21 : [[Offset(336), RelaxedPrecision]];
+  float4 _child22 : [[Offset(352), RelaxedPrecision]];
+  float4 _child23 : [[Offset(368), RelaxedPrecision]];
+  float4 _child24 : [[Offset(384), RelaxedPrecision]];
+  float4 _child25 : [[Offset(400)]];
+}
+Uniform struct5* _6 : [[DescriptorSet(3), Binding(6)]];
+UniformConstant Image&lt;float, 2D&gt;* _9 : [[DescriptorSet(3), Binding(3)]];
+UniformConstant Image&lt;float, 2D&gt;* _10 : [[DescriptorSet(3), Binding(4)]];
+UniformConstant Image&lt;float, 2D&gt;* _11 : [[DescriptorSet(3), Binding(2)]];
+UniformConstant sampler* _12 : [[DescriptorSet(3), Binding(1)]];
+Uniform struct13* _14 : [[DescriptorSet(3), Binding(5)]];
+Input float2* _3 : [[Location(0)]];
+Output float4* _4 : [[Location(0), RelaxedPrecision]];
+
+void _2() {
+  float2 _180 = *_3;
+  Image&lt;float, 2D&gt; _181 = *_9;
+  sampler _182 = *_12;
+  SampledImage&lt;float, 2D&gt; _183 = SampledImage(_181, _182);
+  float4 _184 = ImageSampleExplicitLod(_183, _180, Lod(0.0000));
+  float3 _20 = _184.xyz;
+  float _21 = _184.w : [[RelaxedPrecision]];
+  float4* _185 = &amp;_6._child0;
+  float* _186 = &amp;_6._child0.z;
+  float _187 = *_186;
+  float* _188 = &amp;_6._child0.w;
+  float _189 = *_188;
+  float3 _190 = CompositeConstruct({_187, _189, 0.0000});
+  Image&lt;float, 2D&gt; _191 = *_9;
+  sampler _192 = *_12;
+  float2 _193 = _190.zy;
+  float2 _194 = _180 + _193;
+  SampledImage&lt;float, 2D&gt; _195 = SampledImage(_191, _192);
+  float4 _196 = ImageSampleExplicitLod(_195, _194, Lod(0.0000));
+  float3 _197 = _196.xyz;
+  Image&lt;float, 2D&gt; _198 = *_9;
+  sampler _199 = *_12;
+  float2 _200 = _190.xz;
+  float2 _201 = _180 - _200;
+  SampledImage&lt;float, 2D&gt; _202 = SampledImage(_198, _199);
+  float4 _203 = ImageSampleExplicitLod(_202, _201, Lod(0.0000));
+  float3 _204 = _203.xyz;
+  Image&lt;float, 2D&gt; _205 = *_9;
+  sampler _206 = *_12;
+  float2 _207 = _180 + _200;
+  SampledImage&lt;float, 2D&gt; _208 = SampledImage(_205, _206);
+  float4 _209 = ImageSampleExplicitLod(_208, _207, Lod(0.0000));
+  float3 _210 = _209.xyz;
+  Image&lt;float, 2D&gt; _211 = *_9;
+  sampler _212 = *_12;
+  float2 _213 = _180 - _193;
+  SampledImage&lt;float, 2D&gt; _214 = SampledImage(_211, _212);
+  float4 _215 = ImageSampleExplicitLod(_214, _213, Lod(0.0000));
+  float3 _216 = _215.xyz;
+  float* _217 = &amp;_14._child24.x;
+  float _22 = *_217 : [[RelaxedPrecision]];
+  float3 _53 = _197 + _204;
+  float3 _54 = _53 + _210;
+  float3 _55 = _54 + _216;
+  float3 _56 = _55 * 0.2500;
+  float3 _57 = _20 - _56;
+  float3 _58 = _57 * _22;
+  float3 _59 = _20 * -0.3000;
+  float3 _60 = GLSL.std.450::NMax({-0.1000, -0.1000, -0.1000}, _59);
+  float3 _61 = _20 * 0.3000;
+  float3 _62 = GLSL.std.450::NMin({0.1000, 0.1000, 0.1000}, _61);
+  float3 _63 = GLSL.std.450::FClamp(_58, _60, _62);
+  float3 _64 = _20 + _63;
+  float3 _65 = GLSL.std.450::NMax({0.0000, 0.0000, 0.0000}, _64);
+  float* _218 = &amp;_6._child20.x;
+  float _219 = *_218;
+  float3 _220 = _65 * _219;
+  Image&lt;float, 2D&gt; _221 = *_10;
+  sampler _222 = *_12;
+  SampledImage&lt;float, 2D&gt; _223 = SampledImage(_221, _222);
+  float4 _224 = ImageSampleExplicitLod(_223, _180, Lod(0.0000));
+  float3 _225 = _224.xyz;
+  float* _226 = &amp;_14._child9.z;
+  float _23 = *_226 : [[RelaxedPrecision]];
+  float _24 = 1.0000 - _23;
+  float3 _25 = _225 * _24;
+  bool _26 = _25 &gt; {0.3000, 0.3000, 0.3000};
+  float3 _27 = GLSL.std.450::Pow(_225, {0.3301, 0.3301, 0.3301});
+  float3 _28 = _27 * 1.4941;
+  float3 _29 = _28 - {0.7002, 0.7002, 0.7002};
+  float3 _30 = Select(_26, _29, _225) : [[RelaxedPrecision]];
+  float4* _227 = &amp;_14._child10;
+  float* _228 = &amp;_14._child10.x;
+  float _31 = *_228 : [[RelaxedPrecision]];
+  float4 _32 = *_227 : [[RelaxedPrecision]];
+  float _66 = _220.x : [[RelaxedPrecision]];
+  float _67 = _220.y : [[RelaxedPrecision]];
+  float _68 = _220.z : [[RelaxedPrecision]];
+  float _81 = GLSL.std.450::NMax(_66, _67);
+  float _82 = GLSL.std.450::NMax(_81, _68);
+  float _69 = _32.y : [[RelaxedPrecision]];
+  float _70 = _82 - _69;
+  float _71 = _32.z : [[RelaxedPrecision]];
+  float _72 = GLSL.std.450::FClamp(_70, 0.0000, _71);
+  float _73 = _32.w : [[RelaxedPrecision]];
+  float _74 = _73 * _72;
+  float _75 = _74 * _72;
+  float _76 = _82 - _31;
+  float _77 = GLSL.std.450::NMax(_75, _76);
+  float _78 = GLSL.std.450::NMax(_82, 0.0001);
+  float _79 = _77 / _78;
+  float3 _80 = _220 * _79;
+  float3 _33 = _80 * _23;
+  float3 _34 = _220 - _33;
+  float4* _229 = &amp;_14._child11;
+  float4 _35 = *_229 : [[RelaxedPrecision]];
+  float3 _36 = _35.xyz;
+  float3 _37 = _30 * _36;
+  float3 _38 = _34 + _37;
+  float* _230 = &amp;_14._child9.x;
+  float _39 = *_230 : [[RelaxedPrecision]];
+  float3 _40 = CompositeConstruct({_39, _39, _39}) : [[RelaxedPrecision]];
+  float3 _41 = GLSL.std.450::FMix(_220, _38, _40);
+  float4* _231 = &amp;_14._child1;
+  float4 _42 = *_231 : [[RelaxedPrecision]];
+  float4* _232 = &amp;_14._child2;
+  float4 _43 = *_232 : [[RelaxedPrecision]];
+  float4* _233 = &amp;_14._child4;
+  float4 _44 = *_233 : [[RelaxedPrecision]];
+  float3 _45 = _44.xyz;
+  float* _234 = &amp;_6._child20.z;
+  float _235 = *_234;
+  float2 _236 = _42.xy;
+  float _237 = _42.w;
+  float _238 = _43.x;
+  float _239 = _43.y;
+  float _240 = _43.z;
+  float _241 = _43.w;
+  float _242 = GLSL.std.450::FMix(_238, 1.0000, _237);
+  float2 _243 = _180 - _236;
+  float2 _244 = GLSL.std.450::FAbs(_243);
+  float2 _245 = _244 * _242;
+  float _246 = _245.y;
+  float _247 = _238 * 2.0000;
+  float _248 = GLSL.std.450::FMix(1.0000, _247, _237);
+  float _249 = _246 * _248;
+  float _250 = _238 - 2.8000;
+  float _251 = GLSL.std.450::FClamp(_250, 0.0000, 1.0000);
+  float _252 = _251 * 5.0000;
+  float _253 = _249 + _252;
+  float _254 = GLSL.std.450::FClamp(_253, 0.0000, 1.0000);
+  float _255 = _238 * 1.0500;
+  float _256 = GLSL.std.450::FClamp(_255, 0.0000, 1.0000);
+  float _257 = 1.5000 * _256;
+  float _258 = GLSL.std.450::FMix(1.0000, _257, _237);
+  float _259 = _245.x;
+  float _260 = _259 * _258;
+  float2 _261 = CompositeConstruct({_260, _254});
+  float _262 = GLSL.std.450::FMix(1.0000, _235, _241);
+  float _263 = _235 * 0.5625;
+  float _264 = GLSL.std.450::FMix(_262, _263, _237);
+  float _265 = _260 * _264;
+  float2 _266 = CompositeInsert(_265, _261, {0});
+  float2 _267 = GLSL.std.450::FClamp(_266, {0.0000, 0.0000}, {1.0000, 1.0000});
+  float2 _268 = CompositeConstruct({_240, _240});
+  float2 _269 = GLSL.std.450::Pow(_267, _268);
+  float _270 = Dot(_269, _269);
+  float _271 = 1.0000 - _270;
+  float _272 = GLSL.std.450::FClamp(_271, 0.0000, 1.0000);
+  float _273 = GLSL.std.450::Pow(_272, _239);
+  float3 _274 = CompositeConstruct({_273, _273, _273}) : [[RelaxedPrecision]];
+  float3 _275 = GLSL.std.450::FMix(_45, {1.0000, 1.0000, 1.0000}, _274);
+  float3 _276 = _41 * _275;
+  float4* _277 = &amp;_14._child7;
+  float* _278 = &amp;_14._child7.w;
+  float _279 = *_278;
+  float3 _280 = _276 * _279;
+  float3 _281 = _280 * 5.5547;
+  float3 _282 = _281 + {0.0480, 0.0480, 0.0480};
+  float3 _283 = GLSL.std.450::NMax(_282, {0.0000, 0.0000, 0.0000});
+  float3 _284 = GLSL.std.450::Log2(_283);
+  float3 _285 = _284 * 0.3010;
+  float3 _286 = _285 * 0.2441;
+  float3 _287 = _286 + {0.3860, 0.3860, 0.3860};
+  float3 _288 = GLSL.std.450::FClamp(_287, {0.0000, 0.0000, 0.0000}, {1.0000, 1.0000});
+  Image&lt;float, 2D&gt; _289 = *_11;
+  sampler _290 = *_12;
+  float4 _291 = *_277;
+  float _292 = _291.z;
+  float _293 = _288.z;
+  float _294 = _293 * _292;
+  float _295 = GLSL.std.450::Floor(_294);
+  float2 _296 = _288.xy;
+  float2 _297 = _296 * _292;
+  float2 _298 = _291.xy;
+  float2 _299 = _297 * _298;
+  float2 _300 = _298 * 0.5000;
+  float2 _301 = _299 + _300;
+  float3 _302 = float3(_301.x, _301.y, _288.z);
+  float _303 = _291.y;
+  float _304 = _295 * _303;
+  float _305 = _301.x;
+  float _306 = _305 + _304;
+  float3 _307 = CompositeInsert(_306, _302, {0});
+  float2 _308 = _307.xy;
+  SampledImage&lt;float, 2D&gt; _309 = SampledImage(_289, _290);
+  float4 _310 = ImageSampleExplicitLod(_309, _308, Lod(0.0000));
+  float3 _311 = _310.xyz;
+  float2 _312 = CompositeConstruct({_303, 0.0000});
+  float2 _313 = _308 + _312;
+  SampledImage&lt;float, 2D&gt; _314 = SampledImage(_289, _290);
+  float4 _315 = ImageSampleExplicitLod(_314, _313, Lod(0.0000));
+  float3 _316 = _315.xyz;
+  float _317 = _294 - _295;
+  float3 _318 = CompositeConstruct({_317, _317, _317});
+  float3 _319 = GLSL.std.450::FMix(_311, _316, _318);
+  float3 _83 = _319 * 12.9219;
+  float3 _88 = GLSL.std.450::FAbs(_319);
+  float3 _89 = GLSL.std.450::Pow(_88, {0.4167, 0.4167, 0.4167});
+  float3 _84 = _89 * 1.0547;
+  float3 _85 = _84 - {0.0550, 0.0550, 0.0550};
+  bool _86 = _319 &lt;= {0.0031, 0.0031, 0.0031};
+  float3 _87 = Select(_86, _83, _85) : [[RelaxedPrecision]];
+  float4 _320 = *_185;
+  float2 _321 = _320.xy;
+  float2 _322 = _180 * _321;
+  float _323 = Dot({171.0000, 231.0000}, _322);
+  float3 _324 = CompositeConstruct({_323, _323, _323});
+  float3 _325 = _324 * {0.0097, 0.0141, 0.0103};
+  float3 _326 = GLSL.std.450::Fract(_325);
+  float3 _327 = _326 - {0.5000, 0.5000, 0.5000};
+  float3 _328 = _327 * {0.0039, 0.0039, 0.0039};
+  float3 _46 = _328 * 0.3501;
+  float3 _47 = _87 + _46;
+  float _48 = GLSL.std.450::NMin(_21, 1.0000);
+  float _49 = _47.x : [[RelaxedPrecision]];
+  float _50 = _47.y : [[RelaxedPrecision]];
+  float _51 = _47.z : [[RelaxedPrecision]];
+  float4 _52 = CompositeConstruct({_49, _50, _51, _48}) : [[RelaxedPrecision]];
+  *_4 = _52;
+  return;
+}
+</pre>
+
+<h2>附：数据流速查</h2>
+<table>
+<tr><th>着色器</th><th>ResourceId</th><th>事件</th><th>输入</th><th>输出</th><th>角色</th></tr>
+<tr><td>Bright-Pass</td><td>126477</td><td>E5263</td><td>场景色（采样）</td><td>StorageImage（921×518 级）</td><td>Karis 亮部提取</td></tr>
+<tr><td>降采样高斯</td><td>126528</td><td>E5267/E5291 等</td><td>上一级（采样）</td><td>StorageImage（下一级）</td><td>共享内存 H+V 9-tap Gaussian</td></tr>
+<tr><td>金字塔混合</td><td>126533</td><td>E5319</td><td>低级 fetch + 高级 sample</td><td>StorageImage</td><td>FMix 强度混合升采样</td></tr>
+<tr><td>最终合成</td><td>126537</td><td>E5327</td><td>场景色 + Bloom 末端 + LUT</td><td>126336（RGBA8 最终帧）</td><td>锐化+Bloom 叠加+调色+颗粒</td></tr>
+</table>
+
+<div class="foot">
+  <p>Bloom 链 SPIR-V 反汇编全集 · 2026-09-28 · qrenderdoc(官方) + renderdoc MCP · get_shader_info 原始输出，未删节</p>
+  <p>系列报告：渲染流程总分析（4.4/4.8 节为分析入口）→ 本篇（原始代码归档）</p>
+</div>
+
+</body>
+</html>

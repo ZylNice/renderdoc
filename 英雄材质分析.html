@@ -1,0 +1,197 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋 · 英雄材质实现分析</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#18203267; --panel-solid:#182032; --line:#2a3854;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#1b2a4a,#3b2a5a);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#9fb2d8;font-size:14px}
+  main{max-width:1080px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #5b8cff;padding-left:12px;margin:40px 0 16px;color:#cfe0ff}
+  h3{font-size:16px;color:#a8c3ff;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#1d2942;color:#a8c3ff;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#ffd479;font-size:13px}
+  pre{background:#0a0f1a;border:1px solid #26324c;border-radius:8px;padding:16px;overflow-x:auto;font-size:13px;line-height:1.55;color:#c9d6ee}
+  .tag{display:inline-block;background:#243a63;color:#9fc0ff;border-radius:4px;padding:1px 8px;font-size:12px;margin:2px 4px 2px 0}
+  .note{background:#1a2438;border-left:3px solid #e0a53a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#e8d9b8;margin:12px 0}
+  .flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0;font-size:13px}
+  .flow .step{background:#1d2942;border:1px solid #33477a;border-radius:6px;padding:6px 12px}
+  .flow .arrow{color:#5b8cff}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:800px){.grid2{grid-template-columns:1fr}}
+  .formula{background:#101828;border:1px dashed #33477a;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:13px;color:#9fe8c1}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>英雄材质实现分析报告</h1>
+  <div class="sub">
+    截帧：<code>D:/Renderdoc 截帧/王者万象棋/局内-战斗中（战斗特效）.rdc</code> ｜
+    API：Vulkan（ANGLE 编译 GLSL450 → SPIR-V 1.4）｜ 帧统计：647 draw / 371 纹理 / 9 render pass
+  </div>
+</header>
+<main>
+
+<h2>1. 定位结论</h2>
+<p>本帧为《王者万象棋》局内战斗场景。帧内无中文 marker，通过「蒙皮网格特征（约 8.3k–9k 索引的角色级网格，成对出现于深度预_pass 与主颜色 Pass_）+ 贴图特征（256×256 角色贴图 + 法线 + Ramp/Matcap + BRDF LUT）」定位到英雄绘制。选取 <b>EID 1674</b>（<code>vkCmdDrawIndexed</code>，8352 索引 ≈ 2784 三角形）作为代表性英雄 draw 进行完整逆向。</p>
+<table>
+  <tr><th>项目</th><th>值</th></tr>
+  <tr><td>代表 draw</td><td>EID 1674（主颜色 Pass）；同一模型在 EID 1293（前置 Pass，深度/预备）再画一次</td></tr>
+  <tr><td>顶点着色器</td><td><code>ResourceId::1587006</code>，入口 <code>main</code></td></tr>
+  <tr><td>像素着色器</td><td><code>ResourceId::1587007</code>，入口 <code>main</code></td></tr>
+  <tr><td>网格规模</td><td>8352 索引 / 2784 三角形，单次实例</td></tr>
+  <tr><td>变体情况</td><td>不同英雄使用不同材质变体，如 EID 1970 使用另一套 shader（VS <code>574920</code>/PS <code>574921</code>，仅 4 张贴图的精简版）</td></tr>
+</table>
+<div class="note">渲染管线整体结构：小网格 UI/预备 Pass → 大网格预 Pass（EID 1232–1536，含全部英雄与场景）→ 主颜色 Pass（EID 1574–3993，英雄+特效正式着色）→ 全屏后处理 → 第二份场景 Pass（左右眼/第二相机）。英雄在每个几何 Pass 中成对出现。</div>
+
+<h2>2. 贴图资源（像素阶段，DescriptorSet 1）</h2>
+<table>
+  <tr><th>Binding</th><th>ResourceId</th><th>尺寸/格式</th><th>推断用途</th></tr>
+  <tr><td>0 (<code>_60</code>)</td><td>1591028</td><td>256×256 R8G8B8A8</td><td><b>主贴图 Albedo</b>（采样后做 sRGB→Linear 多项式解码，× 染色 <code>child21.rgb</code>）</td></tr>
+  <tr><td>1 (<code>_61</code>)</td><td>1591034</td><td>256×256 R8G8B8A8</td><td><b>参数遮罩图</b>：x×<code>child8</code>=金属度，y×<code>child7</code>=粗糙度；w×<code>child21.w</code>=不透明度</td></tr>
+  <tr><td>2 (<code>_62</code>)</td><td>2306</td><td>4×4 R8G8B8A8</td><td>小型常值贴图（采样后同走 sRGB 解码，参与 F0 / 自发光基底）</td></tr>
+  <tr><td>3 (<code>_63</code>)</td><td>1591040</td><td>256×256 R8G8B8A8</td><td><b>切线空间法线贴图</b>（<code>*2-1</code> 解码，TBN 变换到世界空间）</td></tr>
+  <tr><td>4 (<code>_64</code>)</td><td>390508</td><td>256×128 R8G8B8A8</td><td><b>高光 Ramp / Matcap 阵列</b>：按粗糙度 floor/ceil(×5) 在 5 段纵向条带间插值，球面 UV 采样（卡通高光核心）</td></tr>
+  <tr><td>5 (<code>_65</code>)</td><td>2303</td><td>4×4 R8G8B8A8</td><td>世界 XZ 平铺的环境染色/噪声图（<code>(n-1)*child6+1</code> 重映射后乘入光照）</td></tr>
+  <tr><td>6 (<code>_66</code>)</td><td>2733</td><td>32×32 R8G8B8A8</td><td><b>GGX 预积分 BRDF LUT</b>（UV = NdotV × roughness，split-sum 的 scale/bias）</td></tr>
+</table>
+
+<h2>3. 顶点着色器分析（1587006）</h2>
+<h3>3.1 输入 / 输出</h3>
+<table>
+  <tr><th>Location</th><th>输入</th><th>输出 (→PS)</th><th>含义</th></tr>
+  <tr><td>0</td><td>float4 位置</td><td>float4</td><td>输出：<b>裁剪空间位置的中间量</b>（xy 存 NDC 半量，zw 透传），供 PS 重建屏幕 UV 做抖动用</td></tr>
+  <tr><td>1</td><td>float3 法线</td><td>float4</td><td>输出：归一化<b>世界法线</b>（w=1）</td></tr>
+  <tr><td>2</td><td>float4 切线</td><td>float4</td><td>输出：归一化<b>世界切线</b>，w=手性（±1，双面翻转用）</td></tr>
+  <tr><td>3</td><td>float2 UV0</td><td rowspan="2">float4</td><td rowspan="2">输出：xy=UV0，zw=UV1/辅助（PS 中 .xz 作世界坐标用途，.w 为<b>雾效因子</b>）</td></tr>
+  <tr><td>4</td><td>float4 UV1/颜色</td></tr>
+</table>
+<h3>3.2 常量缓冲 <code>uniforms85</code>（316 字节）</h3>
+<table>
+  <tr><th>字段</th><th>类型</th><th>推断含义</th></tr>
+  <tr><td>child3</td><td>float4[4]</td><td><b>世界矩阵</b>（Object→World）</td></tr>
+  <tr><td>child4</td><td>float4[4]</td><td><b>法线矩阵</b>（世界逆转置的旋转部分）</td></tr>
+  <tr><td>child5</td><td>float4[4]</td><td><b>ViewProjection 矩阵</b></td></tr>
+  <tr><td>child0.w</td><td>float</td><td>雾强度系数</td></tr>
+  <tr><td>child1 / child7, child6</td><td>float3×2 / int</td><td>雾参考点选择：child6≠0 时用 child7，否则 child1</td></tr>
+  <tr><td>child8</td><td>float4</td><td>距离雾参数（xz=起点，yw=范围倒数）</td></tr>
+  <tr><td>child9 / child10</td><td>float</td><td>径向（平方距离）雾参数</td></tr>
+  <tr><td>child11</td><td>float3</td><td>雾中心（用 xz）</td></tr>
+</table>
+<h3>3.3 逻辑流程</h3>
+<div class="flow">
+  <span class="step">世界变换 worldM·pos</span><span class="arrow">→</span>
+  <span class="step">viewProj·worldPos 得裁剪坐标</span><span class="arrow">→</span>
+  <span class="step">法线/切线分别用对应矩阵变换并归一化</span><span class="arrow">→</span>
+  <span class="step">双雾效因子计算（距离雾 + 到雾中心径向雾，clamp 后 ×0.1 写入 w）</span><span class="arrow">→</span>
+  <span class="step">Push Constant 后处理（UnpackSnorm4x8 做视口/翻转校正，ANGLE 特性）</span>
+</div>
+<div class="note"><b>没有 GPU 蒙皮</b>：常量中无骨骼矩阵数组，顶点仅经单一世界矩阵变换。万象棋棋子（Q 版英雄）的动画应为烘焙顶点动画或静态 pose，每帧由 CPU 侧更新顶点缓冲。</div>
+
+<h2>4. 像素着色器分析（1587007）—— 卡通 PBR 混合材质</h2>
+<p>这是该材质的核心：在标准 GGX PBR 骨架上叠加<b>卡通高光 Ramp（Matcap 阵列）</b>、SH9 环境光、边缘光、双雾效与屏幕抖动透明，最后经自定义 Filmic ToneMapping 输出。</p>
+
+<h3>4.1 整体数据流</h3>
+<div class="flow">
+  <span class="step">Albedo(sRGB解码)×染色</span><span class="arrow">→</span>
+  <span class="step">金属度/粗糙度（遮罩图×系数）</span><span class="arrow">→</span>
+  <span class="step">法线贴图 TBN → 世界法线</span><span class="arrow">→</span>
+  <span class="step">Bayer 抖动镂空 (Kill)</span><span class="arrow">→</span>
+  <span class="step">直接光 GGX</span><span class="arrow">+</span>
+  <span class="step">卡通高光 Ramp</span><span class="arrow">+</span>
+  <span class="step">SH9 环境漫反射</span><span class="arrow">+</span>
+  <span class="step">BRDF LUT 环境高光</span><span class="arrow">→</span>
+  <span class="step">距离雾/高度雾</span><span class="arrow">→</span>
+  <span class="step">边缘光</span><span class="arrow">→</span>
+  <span class="step">Filmic Tonemap</span><span class="arrow">→</span>
+  <span class="step">输出抖动(SpecConst)</span>
+</div>
+
+<h3>4.2 分步拆解</h3>
+
+<h3>① 反照率与 sRGB 解码</h3>
+<div class="formula">uv = UV0 · ST.xy + ST.zw&nbsp;&nbsp;// ST = child20<br>
+albedo = T0(uv)&nbsp;&nbsp;// 256×256<br>
+albedo = albedo·(albedo·(albedo·0.3053 + 0.6822) + 0.0125)&nbsp;&nbsp;// 快速 sRGB→Linear 近似（与精确曲线误差 &lt;0.5%）<br>
+albedo *= child21.rgb&nbsp;&nbsp;// 材质染色</div>
+
+<h3>② 金属度 / 粗糙度 / 不透明度（遮罩图 T1）</h3>
+<div class="formula">metallic&nbsp;&nbsp;= T1.x · child8<br>roughness = max(T1.y · child7, 0.089)&nbsp;&nbsp;// GGX 下限防奇异<br>alpha&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= T0.w · child21.w</div>
+<p>粗糙度平方 <code>a = roughness²</code> 缓存供 GGX 使用；<code>child25</code> 参与漫反射衰减 <code>(1 - T1.y·child25)</code> 形式的重映射（类能量守恒的 diffuse 缩放）。</p>
+
+<h3>③ 法线贴图与 TBN</h3>
+<div class="formula">n_t = T3(uv)·2 − 1;  n_t = normalize(n_t)<br>N = normalize(vNormal);&nbsp;&nbsp;T' = normalize(vTangent − N·dot(N,vTangent))&nbsp;&nbsp;// Gram-Schmidt 正交化<br>B = cross(N, T') · sign(child24.w) · vTangent.w&nbsp;&nbsp;// 双面手性校正<br>Nw = T'·n_t.x + B·n_t.y + N·n_t.z</div>
+
+<h3>④ Bayer 4×4 屏幕门抖动透明（Dithered Transparency）</h3>
+<div class="formula">sUV = (clipPos.xy / clipPos.w) · child26.xy · 0.25<br>bayer = Bayer4x4[floor(fract(|sUV|)·4)]&nbsp;&nbsp;// 由 4 行单位矩阵与常数 {0.0588, 0.7647, …} 点积重建<br>if (bayer − child9 &lt; 0) discard;</div>
+<p>用 4×4 有序抖动 + <code>Kill()</code> 实现英雄淡入淡出/半透明，避免真实混合排序，是王者系角色的典型做法。</p>
+
+<h3>⑤ 直接光 GGX（主光源方向 child12，颜色 child13，强度 child5）</h3>
+<div class="formula">H = normalize(V + L);&nbsp;&nbsp;NdotH、NdotL、NdotV、VdotH 均 saturate<br>D&nbsp;&nbsp;= a² / (π·(NdotH²·(a²−1)+1)²)&nbsp;&nbsp;// 代码中 0.3183 = 1/π<br>Vis = 简化 Smith（(2−a)·NdotV+NdotL 形式的合一近似）<br>F&nbsp;&nbsp;= F0 + (1−F0)·(1−VdotH)⁴·…&nbsp;&nbsp;// Schlick 变体<br>F0 = lerp(0.04, albedo−0.04 系, metallic)&nbsp;&nbsp;// 绝缘体 0.04 与金属 albedo 间插值<br>spec = D·Vis·F&nbsp;&nbsp;+&nbsp;&nbsp;diffuse = albedo/π</div>
+
+<h3>⑥ 卡通高光 Ramp / Matcap 阵列（T4，256×128，本材质的灵魂）</h3>
+<div class="formula">R = reflect(−V, Nw);&nbsp;&nbsp;R.xz 绕 Y 轴旋转 child4·0.0175 rad（度→弧度，可调高光朝向）<br>φ = atan2 多项式近似(R)&nbsp;&nbsp;// 系数 0.0208/−0.0851/0.1801/−0.3303/0.9999<br>θ = acos 多项式近似(R.y)&nbsp;&nbsp;// 系数 −0.0187/0.0743/−0.2121/1.5707<br>u = φ·(1/π)·0.5+0.5，v = θ·(1/π)… → 球面 UV<br>row = roughness·5；采样 floor(row) 与 ceil(row) 两条带（条带偏移表 {0.5,0.5,0/0.5}、{0.25,0.25,0.75…} 共 5 段），按小数部分 lerp<br>specRamp = ramp²（平方提亮）· child17.rgb（高光色）· 遮罩</div>
+<p>等效于一张按粗糙度分 5 档预烘焙的 Matcap 图集：用反射向量球面坐标取卡通化高光形状，再随粗糙度在两档间插值——用 1 次纹理采样 + 1 次 lerp 替代昂贵的环境卷积，获得风格化但粗糙度可控的高光。</p>
+
+<h3>⑦ SH9 球谐环境光（间接漫反射）</h3>
+<div class="formula">// 标准 Ramamoorthi SH 基常数逐一出现：0.4290(c1) / 0.7431(c3) / 0.8862(c4) / 0.2477(c5) / 0.8581 / 1.0233<br>sh = c4·child28 − c5·child34.y + c3·z²·child34 − c5·(x²−y²) 项…（7 个系数向量 child28–34）<br>indirect = sh · child15 · child14 · albedo</div>
+<p>与 Unity <code>ShadeSH9</code> 结构一致，7 个 float4 系数由引擎逐帧/逐区域烘焙传入。</p>
+
+<h3>⑧ 环境高光（Split-Sum + BRDF LUT，T6 32×32）</h3>
+<div class="formula">lut = T6(NdotV, roughness)&nbsp;&nbsp;// 预积分 GGX 环境 BRDF<br>envSpec = F0·lut.x + lut.y&nbsp;&nbsp;→&nbsp;&nbsp;与 specRamp 合并后乘环境色</div>
+
+<h3>⑨ 雾效（双重）</h3>
+<div class="formula">距离雾：color = lerp(color, child19.rgb, vFog)&nbsp;&nbsp;// vFog 由 VS 写入，相机距离驱动<br>高度雾：h = saturate((worldY − child3)·child2)；color = lerp(color, child11.rgb, h)</div>
+
+<h3>⑩ 边缘光（Rim）</h3>
+<div class="formula">rim = lerp((1−NdotV)⁴, (1−NdotV)⁴·child0, …) · child10.rgb<br>color += rim;&nbsp;&nbsp;color = clamp(color, 0, 1)</div>
+
+<h3>⑪ HDR 处理与自定义 Filmic ToneMapping</h3>
+<div class="formula">if (child18.w &gt; 0)&nbsp;&nbsp;// HDR 标记：&gt;1 时减半亮度，否则直通<br>color = color·(0.533·color + 0.151) / (color·(0.526·color + 0.200) + 0.027)&nbsp;&nbsp;// 有理函数 Filmic 曲线</div>
+
+<h3>⑫ 输出抖动（Specialization Constant）</h3>
+<div class="formula">if (specID0 != 0) {<br>&nbsp;&nbsp;d = checkerDither[((x&amp;1)&lt;&lt;1)|(y&amp;1)]&nbsp;&nbsp;// {−0.0117, 0.0039, 0.0117, −0.0039}<br>&nbsp;&nbsp;color += d·(按 specID0 低 2 位选 2×/1×/0.5× 强度)<br>}<br>// 棋盘格微抖动，抑制暗部色带</div>
+
+<h3>4.3 像素常量缓冲 <code>uniforms148</code>（444 字节，35 变量）关键字段</h3>
+<table>
+  <tr><th>字段</th><th>推断含义</th><th>字段</th><th>推断含义</th></tr>
+  <tr><td>child0</td><td>Rim 指数/强度</td><td>child17</td><td>高光 Ramp 染色</td></tr>
+  <tr><td>child1</td><td>整体亮度/反相系数</td><td>child18</td><td>附加色 + HDR 标记(w)</td></tr>
+  <tr><td>child2 / child3</td><td>高度雾 斜率/起点</td><td>child19</td><td>距离雾颜色</td></tr>
+  <tr><td>child4</td><td>Ramp 旋转角（度）</td><td>child20</td><td>主贴图 ST</td></tr>
+  <tr><td>child5</td><td>主光强度</td><td>child21</td><td>染色 rgb + 不透明度 w</td></tr>
+  <tr><td>child6</td><td>环境噪声强度</td><td>child23</td><td>相机世界位置</td></tr>
+  <tr><td>child7 / child8</td><td>粗糙度 / 金属度系数</td><td>child24.w</td><td>双面法线翻转符号</td></tr>
+  <tr><td>child9</td><td>抖动镂空阈值（淡入淡出）</td><td>child25</td><td>漫反射能量重映射</td></tr>
+  <tr><td>child10</td><td>Rim 颜色</td><td>child26</td><td>屏幕 UV 缩放（抖动）</td></tr>
+  <tr><td>child11</td><td>高度雾颜色</td><td>child27</td><td>世界 XZ 噪声 ST</td></tr>
+  <tr><td>child12 / child13</td><td>主光方向 / 颜色</td><td>child28–34</td><td>SH9 环境光 7 系数</td></tr>
+  <tr><td>child14 / child15</td><td>环境光强度×染色</td><td></td><td></td></tr>
+</table>
+
+<h2>5. 结论</h2>
+<table>
+  <tr><th>维度</th><th>结论</th></tr>
+  <tr><td>材质风格</td><td><b>卡通化 PBR 混合</b>：GGX 直接光 + Matcap 高光图集（5 档粗糙度）+ SH9 环境 + BRDF LUT，兼顾风格化与材质区分度</td></tr>
+  <tr><td>顶点阶段</td><td>无 GPU 蒙皮，单世界矩阵；VS 提前计算雾因子与屏幕抖动坐标，减轻 PS 负担</td></tr>
+  <tr><td>透明方案</td><td>Bayer 屏幕门抖动 + discard，规避半透明排序</td></tr>
+  <tr><td>性能特征</td><td>PS 共 7 次纹理采样（其中 2 张 4×4、1 张 32×32 极廉价）；atan/acos 全用多项式近似；无分支循环，适合移动端 tile GPU</td></tr>
+  <tr><td>兼容性</td><td>GLSL450 经 ANGLE 转 SPIR-V，Push Constant 做坐标系校正，Specialization Constant 控制输出抖动开关</td></tr>
+  <tr><td>变体</td><td>不同英雄有不同精简变体（如 EID 1970：4 贴图版本，去掉法线/Ramp/LUT 中的部分通道）</td></tr>
+</table>
+
+</main>
+<footer>由 RenderDoc MCP（rendertest）截帧分析生成 ｜ 代表事件 EID 1674 ｜ 着色器 1587006 / 1587007</footer>
+</body>
+</html>

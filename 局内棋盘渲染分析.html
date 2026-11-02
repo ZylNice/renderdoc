@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋 局内 · 棋盘渲染分析（EID 349 / PS 76525）</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#1b3a3a,#3a2a1b);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#a8c8d8;font-size:14px}
+  main{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #3ac0d0;padding-left:12px;margin:40px 0 16px;color:#c9f0f5}
+  h3{font-size:16px;color:#7fd8e6;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:#14242a;color:#7fd8e6;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#7fd8e6;font-size:12.5px}
+  .note{background:#142028;border-left:3px solid #3ac0d0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#cdeaf2;margin:12px 0}
+  .ok{background:#14301f;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .warn{background:#331a1a;border-left:3px solid #e05a5a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#f0c8c8;margin:12px 0}
+  .formula{background:#0f1a1d;border:1px dashed #2e6a7a;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:12.5px;color:#b8e8f0;white-space:pre-wrap}
+  .flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0;font-size:12.5px}
+  .flow .step{background:#142028;border:1px solid #2e6a7a;border-radius:6px;padding:5px 10px}
+  .flow .arrow{color:#3ac0d0}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>棋盘渲染完整分析（EID 349）</h1>
+  <div class="sub">
+    截帧：<code>局内-有泛光.rdc</code>（王者万象棋，OpenGL ES）｜ EID 349 <code>glDrawElements</code>（90 索引 / 30 三角形）｜
+    VS <code>76524</code> / PS <code>76525</code> ｜ 输出：RT <code>80804</code>（2132×1198 主场景）+ 深度 <code>80805</code> ｜ 依据：SPIR-V 反编译逐指令验证
+  </div>
+</header>
+<main>
+
+<h2>0. 这个 draw 是什么</h2>
+<div class="ok">EID 349 是<b>棋盘本体</b>：一张 90 索引的低面数平面/浅壳网格，在主场景 pass（Colour Pass #2）前段绘制，直接写入全分辨率主场景 RT <code>80804</code>——这张 RT 随后就是泛光链（EID 7063 起）的输入 <code>_u_BloomSrcTex</code>。英雄、特效都画在它之上。同家族另有变体：76521（EID 1804，27942 索引，输出去其他 RT）与 80667（EID 1716，21915 索引，带 VS 顶点波动画的道具）。</div>
+
+<h2>1. 渲染管线</h2>
+<h3>1.1 顶点着色器（VS 76524）</h3>
+<div class="note">极简：只有 <code>_u_MainTex_ST</code> + ObjectToWorld/VP/W2O 矩阵。向 PS 传一路 vec4 varying <code>vs_TEXCOORD0</code>：<b>xy = 第一套 UV，zw = 第二套 UV</b>（经 ST 变换），供 PS 按开关分别选用。无任何顶点动画（波动画是变体 80666 的事）。</div>
+<h3>1.2 像素着色器（PS 76525）执行链</h3>
+<div class="flow">
+  <span class="step">① 双 UV 选择</span><span class="arrow">→</span>
+  <span class="step">② 双贴图采样</span><span class="arrow">→</span>
+  <span class="step">③ 逐格点亮 lerp</span><span class="arrow">→</span>
+  <span class="step">④ 战斗状态提亮（GameState==1）</span><span class="arrow">→</span>
+  <span class="step">⑤ 染色 + alpha 裁剪</span><span class="arrow">→</span>
+  <span class="step">⑥ 屏幕空间暗角（反射门控）</span><span class="arrow">→</span>
+  <span class="step">输出</span>
+</div>
+
+<h3>① 双 UV 选择</h3>
+<div class="formula">uvMain   = _u_MainTexUse2UV ? vs_TEXCOORD0.zw : vs_TEXCOORD0.xy
+uvLightOn= _u_Use2UV        ? vs_TEXCOORD0.zw : vs_TEXCOORD0.xy
+// 主图与点亮层可各自独立选择 UV 集（第二套 UV 通常用于不同平铺/对齐方式）</div>
+
+<h3>② 双贴图采样</h3>
+<div class="formula">main    = tex(_u_MainTex,   uvMain)     // 1024²（76966）：熄灭态棋盘
+lightOn = tex(_u_LightOnTex, uvLightOn) // 1024²（76967）：点亮态棋盘
+                                        // ★ lightOn.a = 逐格点亮阈值 mask</div>
+
+<h3>③ 逐格点亮系统</h3>
+<div class="formula">t = (_u_ChangeValue &gt;= lightOn.a) ? 1.0 : 0.0;   // 全局进度 vs 每格阈值
+if (_u_IsSmoothChange != 0) t = _u_ChangeValue;    // 平滑模式：整板连续渐变
+color = lerp(main, lightOn, t);                    // 熄灭格 → 点亮格</div>
+<div class="note"><b>机制</b>：LightOnTex 的 alpha 是美术刷的"点亮时刻表"（每格一个灰度=点亮时机）；<code>_u_ChangeValue</code> 是 CPU 每帧推进的 0→1 全局时钟。时钟扫过阈值时格子依次亮起——硬阶跃模式逐格跳变，平滑模式整板交叉淡化。</div>
+
+<h3>④ 战斗状态提亮（仅 GameState==1）</h3>
+<div class="formula">if (_u_GameState == 1) {
+    uvL = _u_LightenTexUse2UV ? vs_TEXCOORD0.zw : vs_TEXCOORD0.xy;
+    color.rgb = lerp(color.rgb, tex(_u_LightenStateTex, uvL).rgb, _u_StateChangeValue);
+}
+// _u_LightenStateTex = 1024²（76965）：战斗态整板提亮/变色图
+// _u_StateChangeValue = 0→1 的切换进度（平滑过渡，非跳变）</div>
+
+<h3>⑤ 染色与 alpha 裁剪</h3>
+<div class="formula">color *= _u_Color;                        // 整体染色
+alpha  = color.a × _u_MainAlpha;
+if (_u_IsAlphaTest &amp;&amp; alpha - _u_CutOffValue &lt; 0) discard;   // 镂空裁剪（缝隙/花纹）</div>
+
+<h3>⑥ 屏幕空间暗角（前向、反射门控）</h3>
+<div class="formula">if (_u_Vignette_Params2.z &gt; 0) {                    // 强度&gt;0 才启用
+    sUV = gl_FragCoord.xy / _ug_ScreenParams.xy;      // 屏幕 UV（ProjectionParams.x 控 Y 翻转）
+    d   = abs(sUV - Params2.xy) × Params2.z;          // Params2.xy=中心, z=强度
+    d.x *= Params1.w;                                 // XY 比例校正
+    v   = pow(max(1 − dot(d,d), 0), Params2.w);       // 径向衰减，w=幂次
+    vig = lerp(Params1.rgb, vec3(1), v);              // 中心白 → 边缘 Params1.rgb
+    color.rgb = (_ug_EnableBlurReflection ≤ 0.5) ? color.rgb × vig : color.rgb;
+}</div>
+<div class="warn">暗角是<b>前向逐像素</b>算在棋盘 shader 里的（非后处理），只压棋盘、不压英雄特效。且被 <code>_ug_EnableBlurReflection</code> 门控：开模糊反射时跳过——反射 RT 中已含暗角，避免压两次。</div>
+
+<h3>输出</h3>
+<div class="formula">SV_Target0 = vec4(color.rgb, alpha)  →  RT 80804（主场景）+ 深度 80805
+// alpha = MainTex.a 经点亮 lerp 后 × _u_Color.a × _u_MainAlpha</div>
+
+<h2>2. 资源清单</h2>
+<h3>2.1 纹理</h3>
+<table>
+  <tr><th>Binding</th><th>名称</th><th>ResourceId</th><th>尺寸</th><th>用途</th></tr>
+  <tr><td>0</td><td><code>_u_MainTex</code></td><td>76966</td><td>1024²</td><td>熄灭态棋盘主图（a 参与点亮 lerp 与裁剪）</td></tr>
+  <tr><td>1</td><td><code>_u_LightOnTex</code></td><td>76967</td><td>1024²</td><td>点亮态棋盘图；<b>a = 逐格点亮阈值 mask</b></td></tr>
+  <tr><td>2</td><td><code>_u_LightenStateTex</code></td><td>76965</td><td>1024²</td><td>战斗态提亮图（仅 GameState==1 使用）</td></tr>
+</table>
+<div class="note">同族变体 76521/80667 的第三张是 4×4 小 LUT；本棋盘中它是全尺寸 1024²——战斗态提亮是按 UV 逐像素取色的整板图案，而非纯色查找。</div>
+<h3>2.2 常量（$Globals，16 项）</h3>
+<table>
+  <tr><th>常量</th><th>含义</th></tr>
+  <tr><td><code>_u_ChangeValue</code> / <code>_u_IsSmoothChange</code></td><td>点亮全局进度（0→1）/ 平滑·硬阶跃选择</td></tr>
+  <tr><td><code>_u_GameState</code> / <code>_u_StateChangeValue</code></td><td>游戏状态（==1 进战斗提亮分支）/ 提亮进度</td></tr>
+  <tr><td><code>_u_Color</code> / <code>_u_MainAlpha</code></td><td>整体染色 / 总透明度</td></tr>
+  <tr><td><code>_u_CutOffValue</code> / <code>_u_IsAlphaTest</code></td><td>镂空裁剪阈值 / 开关</td></tr>
+  <tr><td><code>_u_Vignette_Params1</code> / <code>_u_Vignette_Params2</code></td><td>暗角：Params1.rgb=边缘色、w=XY 比例；Params2.xy=中心、z=强度、w=幂次</td></tr>
+  <tr><td><code>_u_MainTexUse2UV</code> / <code>_u_Use2UV</code> / <code>_u_LightenTexUse2UV</code></td><td>三张图各自的 UV 集选择</td></tr>
+  <tr><td><code>_ug_EnableBlurReflection</code> / <code>_ug_ScreenParams</code> / <code>_u_ProjectionParams</code></td><td>暗角门控（开反射跳过暗角）/ 屏幕尺寸 / Y 翻转</td></tr>
+</table>
+
+<h2>3. 结论要点</h2>
+<div class="formula">1) 棋盘是单 draw 低模平面（30 三角形），所有表现都在 PS 内完成：点亮动画、状态切换、
+   裁剪、暗角四合一，无额外 pass
+2) 两套"时间轴"互不干扰：_u_ChangeValue 管逐格点亮（对 LightOnTex.a 阈值扫动），
+   _u_StateChangeValue 管战斗态提亮（GameState==1 时的整体 lerp 进度）
+3) 暗角在前向 shader 内、屏幕空间、且被模糊反射开关门控
+4) 输出 RT 80804 是泛光链的直接输入——棋盘点亮/提亮的高亮区域会成为 Bloom 亮斑源
+5) 同族三 shader（76525/76521/80667）共享常量布局与 PS 逻辑，差异在纹理配置与 VS
+   （80666 额外带 RippleFreq/Strength 顶点波动画）</div>
+
+</main>
+<footer>由 RenderDoc MCP（renderdoc）截帧分析生成 ｜ 局内-有泛光.rdc ｜ EID 349 ｜ VS 76524 / PS 76525 ｜ SPIR-V 逐指令验证</footer>
+</body>
+</html>

@@ -1,0 +1,214 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋 · 英雄像素着色器（1587007）逐行分析</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#3a2a1b,#1b2a4a);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#c9b28f;font-size:14px}
+  main{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #e0a53a;padding-left:12px;margin:40px 0 16px;color:#ffe1a8}
+  h3{font-size:16px;color:#ffd479;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:#2a2417;color:#ffd479;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#ffd479;font-size:12.5px}
+  pre{background:#0a0f1a;border:1px solid #26324c;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55;color:#c9d6ee}
+  .note{background:#241f14;border-left:3px solid #e0a53a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#e8d9b8;margin:12px 0}
+  .ok{background:#14301f;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .warn{background:#331a1a;border-left:3px solid #e05a5a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#f0c8c8;margin:12px 0}
+  .formula{background:#171408;border:1px dashed #6b5426;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:12.5px;color:#f0dfa8;white-space:pre-wrap}
+  .flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0;font-size:12.5px}
+  .flow .step{background:#241f14;border:1px solid #6b5426;border-radius:6px;padding:5px 10px}
+  .flow .arrow{color:#e0a53a}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>英雄像素着色器逐行分析报告</h1>
+  <div class="sub">
+    Shader：<code>ResourceId::1587007</code>（Pixel）｜ 代表 draw：EID 1674（8352 索引）｜
+    来源：RenderDoc 反编译 GLSL460（ANGLE GLSL450 → SPIR-V 1.4）｜ 截帧：王者万象棋-局内战斗
+  </div>
+</header>
+<main>
+
+<h2>0. 归属确认</h2>
+<div class="ok">本 GLSL 即英雄 FS（1587007）：7 张纹理 + 444B 常量（_m0–_m34）+ 主体函数 <code>_152()</code> + 引擎统一抖动尾巴，与截帧 SPIR-V 逐指令吻合。它与上一份「背景 FS」的唯一共性是末尾的输出抖动 epilogue。</div>
+
+<h2>1. 接口映射</h2>
+<h3>1.1 顶点输入（VS 传入的 varying）</h3>
+<table>
+  <tr><th>变量</th><th>Location</th><th>含义</th></tr>
+  <tr><td><code>_67</code></td><td>0</td><td>裁剪空间位置 → <code>_67.xy/_67.ww</code> 得屏幕 UV，供 Bayer 抖动镂空</td></tr>
+  <tr><td><code>_68</code></td><td>1</td><td>世界法线（xyz）</td></tr>
+  <tr><td><code>_69</code></td><td>2</td><td>世界切线（xyz），w = 手性 ±1（双面翻转）</td></tr>
+  <tr><td><code>_70</code></td><td>3</td><td>xyz = 世界坐标（xz 供光照噪声、y 供高度雾）；<b>w = 顶点雾因子（VS 预算，×0.1 缩放）</b></td></tr>
+  <tr><td><code>_71</code></td><td>4</td><td>xy = 主 UV（经 <code>_m20</code> ST 变换）；zw = 辅助 UV</td></tr>
+</table>
+<h3>1.2 纹理（set 1）</h3>
+<table>
+  <tr><th>变量</th><th>Binding</th><th>尺寸</th><th>用途（对应代码段）</th></tr>
+  <tr><td><code>_60</code></td><td>0</td><td>256²</td><td>Albedo：sRGB 解码 ×<code>_m21.rgb</code> 染色；w×<code>_m21.w</code>=最终 alpha</td></tr>
+  <tr><td><code>_61</code></td><td>1</td><td>256²</td><td>遮罩：x×<code>_m8</code>=粗糙度（下限 0.089）、y×<code>_m7</code>×<code>_m25</code>=金属度</td></tr>
+  <tr><td><code>_62</code></td><td>2</td><td>4×4</td><td>自发光/底色：sRGB 解码 ×<code>_m22</code>，叠加到直接光结果</td></tr>
+  <tr><td><code>_63</code></td><td>3</td><td>256²</td><td>切线空间法线（×2−1，TBN 到世界空间）</td></tr>
+  <tr><td><code>_64</code></td><td>4</td><td>256×128</td><td>Matcap 高光图集：球面 UV，粗糙度×5 在 6 条带间 floor/ceil 插值</td></tr>
+  <tr><td><code>_65</code></td><td>5</td><td>4×4</td><td>世界 XZ 平铺<b>光照噪声</b>（假云影）：<code>(n−1)·_m6+1</code> 解码后调制主光</td></tr>
+  <tr><td><code>_66</code></td><td>6</td><td>32×32</td><td>GGX 预积分 BRDF LUT（NdotV×roughness → scale/bias）</td></tr>
+</table>
+
+<h2>2. 执行流程总览（函数 <code>_152()</code>）</h2>
+<div class="flow">
+  <span class="step">① Albedo sRGB解码×染色</span><span class="arrow">→</span>
+  <span class="step">② 遮罩→粗糙度/金属度</span><span class="arrow">→</span>
+  <span class="step">③ 法线 TBN</span><span class="arrow">→</span>
+  <span class="step">④ Bayer 抖动 discard</span><span class="arrow">→</span>
+  <span class="step">⑤ 光照噪声(_65)</span><span class="arrow">→</span>
+  <span class="step">⑥ GGX 直接光</span><span class="arrow">→</span>
+  <span class="step">⑦ SH9 环境</span><span class="arrow">→</span>
+  <span class="step">⑧ Matcap Ramp(_64)</span><span class="arrow">→</span>
+  <span class="step">⑨ BRDF LUT(_66)</span><span class="arrow">→</span>
+  <span class="step">⑩ 距离雾</span><span class="arrow">→</span>
+  <span class="step">⑪ HDR/Tonemap</span><span class="arrow">→</span>
+  <span class="step">⑫ 边缘光</span><span class="arrow">→</span>
+  <span class="step">⑬ 高度雾</span><span class="arrow">→</span>
+  <span class="step">⑭ 输出+抖动</span>
+</div>
+
+<h2>3. 关键代码段精解</h2>
+
+<h3>① Albedo 与 sRGB 快速解码</h3>
+<div class="formula">vec2 uv = _71.xy * _m20.xy + _m20.zw;          // 主 UV ST 变换
+_92 = texture(_60, uv);
+// c*(c*(c*0.30530601 + 0.68217111) + 0.01252288) —— sRGB EOTF 三次多项式近似
+_93 = _92.rgb * (_92.rgb * (_92.rgb * 0.30530601 + 0.68217111) + 0.01252288);
+albedo = _93 * _m21.rgb;                          // 材质染色</div>
+
+<h3>② 金属度 / 粗糙度</h3>
+<div class="formula">mask = texture(_61, uv).rgb;
+roughness = max(mask.x * _m8, 0.089);   // _102.y；GGX 下限防奇异
+metallic  = mask.y * _m7 * _m25;        // _125
+diffuse  *= (1 - metallic) * _m25;      // _137/_286 段：能量守恒
+F0 = lerp(vec3(0.04), albedo - 0.04 系, metallic) * _m25;   // _103/_104 段</div>
+
+<h3>③ 法线贴图 + TBN（含双面手性）</h3>
+<div class="formula">nT = normalize(texture(_63, uv).rgb * 2 - 1);
+N  = normalize(_68.xyz);
+T  = normalize(_69.xyz - N * dot(N, _69.xyz));    // Gram-Schmidt 正交化
+B  = cross(N, T) * sign(_m24.w) * _69.w;          // 双面翻转 × 切线手性
+Nw = T*nT.x + B*nT.y + N*nT.z;                    // _93
+V  = normalize(_m23 - _70.xyz);                   // _m23=相机位置；_106
+NdotV = clamp(dot(Nw, V), 0, 1);                  // _102.x</div>
+
+<h3>④ Bayer 4×4 抖动镂空（淡入淡出）</h3>
+<div class="formula">sUV = fract(|_67.xy/_67.ww * _m26.xy * 0.25|) * 4;  // 屏幕 2×2→4×4 格
+bayer = 由 4 行单位矩阵与 4 组常数点积重建（0.0588/0.7647/... 即 Bayer/16）
+if (bayer - _m9 &lt; 0) discard;                     // _m9 = 消融阈值</div>
+
+<h3>⑤ 光照噪声（假云影/地面光斑，_65 4×4 平铺）</h3>
+<div class="formula">n = texture(_65, _70.xz * _m27.xy + _m27.zw).rgb;   // 世界 XZ 平铺
+k = sRGBdecode((n - 1) * _m6 + 1) * _m5 * _m13;      // _m6 强度 / _m5 光强 / _m13 光色
+// 之后直接光结果整体 × k（_101），形成地面移动的光影斑驳</div>
+
+<h3>⑥ GGX 直接光（L=<code>_m12</code>）</h3>
+<div class="formula">H = normalize(V + L);  NdotL / NdotH / VdotH 各 clamp
+D   = a² / (π·(a²·NdotH² − NdotH² + 1)²)          // a=roughness²；0.31830987 = 1/π
+Vis = 1 / (((2−a)·NdotL + a)·((2−a)·NdotV + a))   // 合一 Smith 近似
+F   = lerp(F0, 1, (1−VdotH)⁴·…)                    // Schlick 变体，含 _103.y*50 的锐化项
+direct = (albedo/π + D·Vis·F) · k · NdotL</div>
+
+<h3>⑦ SH9 环境漫反射</h3>
+<div class="formula">sh = 0.886227·_m28 − 0.247708·_m34 + 0.743125·z²·_m34
+   + 0.858086·(xz·_m28w..30w + yz·_m33 + xy·_m32)
+   + 1.023328·(x·_m31 + y·_m29 + z·_m30)
+   + 0.429043·(x²−y²)·(_m31w,_m32w,_m33w)          // 7 系数 _m28–_m34，Ramamoorthi 常数
+indirect = sh · _m15 · _m14 · albedo;             // 逐区域烘焙传入</div>
+
+<h3>⑧ Matcap 高光图集（_64，卡通高光核心）</h3>
+<div class="formula">R  = reflect(−V, Nw);  R.xz 绕 Y 旋转 _m4·0.0174533（度→弧度）
+φ  = atan2(R.z, R.x) 多项式近似（0.0208351/−0.085133/0.180141/−0.330299/0.999866）
+θ  = acos(R.y)      多项式近似（−0.0187293/0.074261/−0.212114/1.5707288）
+uv = (φ/π·0.5+0.5, 1−θ/π)
+row = roughness·5；A=_145[floor(row)]、B=_146[ceil(row)] 条带偏移表（6 条带，x∈{0.5,0.25} 两段宽）
+specRamp = lerp(texture(_64, uv·A.xy+A.zw), texture(_64, uv·B.xy+B.zw), fract(row))
+specRamp = (specRamp.rgb · specRamp.a·6)² · _m17.rgb · (albedo.z·环境亮度)</div>
+
+<h3>⑨ BRDF LUT 环境高光（split-sum）</h3>
+<div class="formula">lut = texture(_66, vec2(NdotV, roughness)).rg;
+envSpec = F0·lut.x + lut.y;   // 与 specRamp 合并后 + direct + indirect</div>
+
+<h3>⑩ 距离雾（加性 lerp，调试点见 §5）</h3>
+<div class="formula">// _m19.rgb = 距离雾颜色；_70.w = VS 预算的雾因子
+color = mix(color, _m19.rgb, _70.w);
+// 对应：_1414 = _m19 − _93;  _84 = _70.www * _1414 + _93</div>
+
+<h3>⑪ HDR 标记与自定义 Filmic Tonemap</h3>
+<div class="formula">color = color · (_m18.rgb + 1) · _m16;
+if (_m18.w &gt; 0) color = (_m18.w &gt; 1) ? color·0.5 : color;   // HDR 压半
+// 有理函数 Filmic 曲线：
+color = color·(0.533·color + 0.151) / (color·(0.526·color + 0.200) + 0.027);</div>
+
+<h3>⑫ 边缘光（Rim）</h3>
+<div class="formula">f = (1 − NdotV)²;  rim = f⁴ − f²·… 经 _m0 塑形后
+color = clamp(color + rim · _m10.rgb, 0, 1);
+color *= (1 − _m1);                                  // _m1 整体亮度</div>
+
+<h3>⑬ 高度雾（乘性，逐像素 worldY）</h3>
+<div class="formula">h = clamp((_70.y − _m3) · _m2, 0, 1);       // _m3 起点 / _m2 斜率
+color *= mix(_m11.rgb, vec3(1), h);          // _m11 = 高度雾色（乘性压暗/染色）
+// 对应：_100=_93·_m11; _123=_93·(1−_m11); _103 = h·_123 + _100</div>
+
+<h3>⑭ 输出</h3>
+<div class="formula">_72 = vec4(color, alpha);   // alpha ≈ albedo.a · _m21.w
+// main() 尾巴：specID0≠0 时加 2×2 棋盘抖动 {−0.0117, 0.0039, 0.0117, −0.0039}（×2/×1/×0.5 三档），抗色带</div>
+
+<h2>4. 常量缓冲速查（set0/binding1，444B）</h2>
+<table>
+  <tr><th>字段</th><th>含义</th><th>字段</th><th>含义</th></tr>
+  <tr><td>_m0</td><td>Rim 塑形</td><td>_m18</td><td>rgb 附加染色+1；w HDR 标记</td></tr>
+  <tr><td>_m1</td><td>整体亮度（1−x 缩放）</td><td>_m19</td><td><b>距离雾颜色</b></td></tr>
+  <tr><td>_m2 / _m3</td><td><b>高度雾 斜率 / 起点(worldY)</b></td><td>_m20</td><td>主 UV ST</td></tr>
+  <tr><td>_m4</td><td>Ramp 旋转角（度）</td><td>_m21</td><td>Albedo 染色 rgb + alpha w</td></tr>
+  <tr><td>_m5 / _m6</td><td>光强 / 光照噪声强度</td><td>_m22</td><td>自发光(_62) 染色</td></tr>
+  <tr><td>_m7 / _m8</td><td>金属度 / 粗糙度系数</td><td>_m23</td><td>相机世界位置</td></tr>
+  <tr><td>_m9</td><td>Bayer 消融阈值</td><td>_m24.w</td><td>双面符号</td></tr>
+  <tr><td>_m10</td><td>Rim 颜色</td><td>_m25</td><td>金属度重映射/能量守恒</td></tr>
+  <tr><td>_m11</td><td><b>高度雾颜色（乘性）</b></td><td>_m26</td><td>抖动屏幕缩放</td></tr>
+  <tr><td>_m12 / _m13</td><td>主光方向 / 颜色</td><td>_m27</td><td>光照噪声 ST</td></tr>
+  <tr><td>_m14 / _m15</td><td>SH 环境 强度/染色</td><td>_m28–_m34</td><td>SH9 七系数</td></tr>
+  <tr><td>_m16</td><td>雾后总染色</td><td>_m17</td><td>Matcap 高光染色</td></tr>
+</table>
+
+<h2>5. RenderDoc 雾效调试指南</h2>
+<div class="note">本材质的雾是<b>前向分段</b>的：距离雾因子在 <b>VS</b> 算好（存 <code>_70.w</code>，带 0.1 缩放），PS 只做 lerp；高度雾完全在 PS（<code>_70.y</code> 逐像素）。调试时先分清改哪一段。</div>
+
+<h3>5.1 不改 shader：先观测实际值</h3>
+<div class="formula">1) Event Browser 选 EID 1674 → Texture Viewer 右键英雄像素 → Debug Pixel
+2) 单步到 ⑩/⑬ 段，直接看 _70.w（距离雾因子）、_m19、_m2/_m3/_m11 的运行时值
+3) Pipeline State → PS → Uniform Buffers → set0/binding1 可整表查看 35 个常量当前值
+4) VS 侧雾参数在 VS 的 UBO（316B：世界矩阵 + 雾 child8/9/10/11），距离雾范围要改这里</div>
+
+<h3>5.2 改 shader：Shader Viewer → Edit（GLSL 反编译可直接改并重编译）</h3>
+<table>
+  <tr><th>目的</th><th>修改（在 <code>_152()</code> 末尾 <code>_72</code> 赋值前后操作）</th></tr>
+  <tr><td>可视化距离雾因子分布</td><td><code>_72 = vec4(vec3(_70.w), 1.0);</code>（嫌暗就 ×10，因 VS 乘了 0.1）</td></tr>
+  <tr><td>可视化高度雾因子</td><td><code>_72 = vec4(vec3(clamp((_70.y - _148._m3) * _148._m2, 0.0, 1.0)), 1.0);</code></td></tr>
+  <tr><td>关闭距离雾</td><td>把 <code>_84 = (_70.www * _86.xyz) + _93;</code> 改为 <code>_84 = _93;</code></td></tr>
+  <tr><td>关闭高度雾</td><td>把 <code>_103 = (_103.xxx * _123) + _100;</code> 改为 <code>_103 = _93;</code></td></tr>
+  <tr><td>雾色标红看范围</td><td>把 <code>_148._m19.xyz</code> 替换为 <code>vec3(10.0, 0.0, 0.0)</code>（超亮红，雾区一目了然）</td></tr>
+  <tr><td>排除输出抖动干扰</td><td>把 SpecConstant <code>specID0</code> 置 0（Edit 面板可改），或删掉 main() 里的抖动块</td></tr>
+  <tr><td>调距离雾远近/浓度</td><td>PS 改不了——因子来自 VS。改 VS（1587006）里雾参数 UBO 的 child8/9/10，或在 VS 末尾把 <code>_68.w</code>（雾因子输出）乘个系数再写出</td></tr>
+</table>
+<div class="warn">注意：距离雾 lerp 之后还有 Tonemap 与高度雾，直接把 <code>_72</code> 覆写成雾因子时要<b>跳过</b>后续计算（放在函数末尾、原有 <code>_72</code> 赋值之后），否则看到的不是纯因子。改完 Apply 后 RenderDoc 会重放整帧，所有用该 shader 的英雄都会生效。</div>
+
+</main>
+<footer>由 RenderDoc MCP（rendertest）截帧分析 + GLSL 反编译交叉验证生成 ｜ EID 1674 ｜ PS 1587007 / VS 1587006</footer>
+</body>
+</html>

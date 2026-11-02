@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋 · 局内战斗 · 渲染流程分析</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #171e2e;
+    --panel2: #1d2638;
+    --border: #2b3752;
+    --text: #d7deeb;
+    --muted: #8b97ad;
+    --accent: #4da3ff;
+    --green: #43c78a;
+    --orange: #f0a44a;
+    --red: #ef6a6a;
+    --purple: #b07fe8;
+    --cyan: #4ac8d8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    line-height: 1.75;
+    font-size: 15px;
+  }
+  .container { max-width: 1080px; margin: 0 auto; padding: 40px 28px 80px; }
+  header {
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 24px;
+    margin-bottom: 32px;
+  }
+  header h1 { margin: 0 0 8px; font-size: 26px; color: #fff; }
+  header .sub { color: var(--muted); font-size: 14px; }
+  h2 {
+    font-size: 20px; color: var(--accent);
+    border-left: 4px solid var(--accent);
+    padding-left: 12px; margin: 44px 0 18px;
+  }
+  h3 { font-size: 16px; color: #fff; margin: 24px 0 10px; }
+  code, .mono {
+    font-family: Consolas, "Cascadia Code", monospace;
+    background: #0a0e18;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 13px;
+    color: #ffd479;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 13.5px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 7px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--panel2); color: #fff; white-space: nowrap; }
+  td { background: var(--panel); }
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin: 18px 0;
+  }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .stat .v { font-size: 24px; font-weight: 700; color: #fff; }
+  .stat .k { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .pass {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin: 18px 0;
+  }
+  .pass > h3 {
+    margin-top: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .tag {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 400;
+    padding: 2px 10px;
+    border-radius: 20px;
+    border: 1px solid;
+    white-space: nowrap;
+  }
+  .tag.shadow { color: var(--purple); border-color: var(--purple); }
+  .tag.scene  { color: var(--accent); border-color: var(--accent); }
+  .tag.post   { color: var(--cyan); border-color: var(--cyan); }
+  .tag.ui     { color: var(--green); border-color: var(--green); }
+  .tag.shell  { color: var(--orange); border-color: var(--orange); }
+  .tag.next   { color: var(--red); border-color: var(--red); }
+  .eid { color: var(--muted); font-size: 12.5px; font-weight: 400; }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  .flow {
+    background: #0a0e18;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    font-family: Consolas, monospace;
+    font-size: 13.5px;
+    line-height: 1.9;
+    white-space: pre;
+    overflow-x: auto;
+    color: var(--text);
+  }
+  .flow .g { color: var(--green); }
+  .flow .o { color: var(--orange); }
+  .flow .r { color: var(--red); }
+  .flow .c { color: var(--cyan); }
+  .note {
+    background: rgba(77,163,255,.08);
+    border-left: 4px solid var(--accent);
+    padding: 12px 16px;
+    border-radius: 0 8px 8px 0;
+    margin: 14px 0;
+  }
+  .warn {
+    background: rgba(240,164,74,.08);
+    border-left: 4px solid var(--orange);
+    padding: 12px 16px;
+    border-radius: 0 8px 8px 0;
+    margin: 14px 0;
+  }
+  .obs { counter-reset: obs; }
+  .obs .item {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin: 12px 0;
+  }
+  .obs .item h4 { margin: 0 0 6px; color: #fff; font-size: 15px; }
+  .small { font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>王者万象棋 · 局内战斗 · 渲染流程分析</h1>
+  <div class="sub">
+    截帧文件：<code>局内-战斗-OpenGL.rdc</code> ｜ API：OpenGL ES（模拟器/投屏外壳环境）｜
+    分析工具：RenderDoc + Rendertest MCP ｜ 2026-09-21
+  </div>
+</header>
+
+<h2>一、截帧概览</h2>
+
+<div class="stat-grid">
+  <div class="stat"><div class="v">691</div><div class="k">Action 总数</div></div>
+  <div class="stat"><div class="v">608</div><div class="k">Draw Call</div></div>
+  <div class="stat"><div class="v">51</div><div class="k">Clear</div></div>
+  <div class="stat"><div class="v">25</div><div class="k">顶层 Pass</div></div>
+  <div class="stat"><div class="v">450 / 416</div><div class="k">纹理 / Buffer</div></div>
+  <div class="stat"><div class="v">~33 ms</div><div class="k">GPU 计时合计（见下方说明）</div></div>
+</div>
+
+<div class="warn">
+  <b>计时可靠性说明：</b>该截帧运行于模拟器环境，GPU 计数器可靠性差（大量 draw 计时为 0）。
+  总计 33ms 仅供参考；真正有参考价值的是几个大的同步点：
+  EID 656 的 <code>glInvalidateFramebuffer</code> 等待 <b>10.8ms</b>、EID 8575 等待 <b>3.3ms</b>、
+  EID 6541 等待 <b>2.8ms</b>、<code>glFinish</code> 1.49ms、帧尾 <code>glFlush</code> 1.97ms。
+  这些不是绘制开销，而是管线等待气泡。
+</div>
+
+<div class="note">
+  <b>关键前提：</b>本截帧<b>跨帧</b> —— 游戏渲染线程在上一帧尚未 present 时就开始提交下一帧，
+  导致帧尾卷入了下一帧的阴影 / 投影 / 不透明场景（约 123 DC）。
+  剔除后<b>单帧游戏真实 DC ≈ 483</b>。
+</div>
+
+<h2>二、逐 Pass 分析</h2>
+
+<div class="pass">
+  <h3>1. Depth-only Pass #1 <span class="tag shadow">方向光阴影图</span> <span class="eid">EID 203–316 · 11 次绘制</span></h3>
+  <table>
+    <tr><th>输出目标</th><td><code>D16 1024×1024</code> 深度图（184522），无颜色目标</td></tr>
+    <tr><th>判定依据</th><td>VS 常量含 <code>_ug_ShadowPancaking</code>、<code>_ug_OrthoCamera</code>、<code>_ug_DepthBias</code>、<code>_ug_ShadowNearClipPlane</code> → 正交阴影相机 + 深度偏移，典型 Unity 方向光 shadow map（含 pancaking 优化）</td></tr>
+    <tr><th>内容</th><td>10 个投影物：棋盘地形（27585 / 21885 idx）、英雄（8352 / 8235 / 10338 idx）、2×798 idx 小物件等</td></tr>
+    <tr><th>备注</th><td>首尾 <code>glInvalidateFramebuffer</code>：tile-based GPU 上放弃旧内容，移动管线常规操作</td></tr>
+  </table>
+</div>
+
+<div class="pass">
+  <h3>2. Colour Pass #1 <span class="tag shadow">角色贴地投影 RT</span> <span class="eid">EID 322–632 · 42 次绘制</span></h3>
+  <table>
+    <tr><th>输出目标</th><td><code>R8_UNORM 512×512</code>（69250）</td></tr>
+    <tr><th>红色 Clear</th><td>(1,0,0,1) —— 单通道阴影 mask，R=1 表示"无阴影"，英雄投影区域压暗</td></tr>
+    <tr><th>判定依据</th><td>PS 常量 <code>_u_ProjectorShadowStrength</code>、<code>_ug_HeroShadowIntensity</code>；VS <code>_ug_ShadowExpandScale</code> → 王者荣耀系的角色贴片假阴影（projector blob shadow）</td></tr>
+    <tr><th>内容</th><td>42 个 draw 与 Depth-only #1 中的角色网格一一对应（把棋子/英雄画进投影图）</td></tr>
+  </table>
+</div>
+
+<div class="pass">
+  <h3>3. 游离 Draw <span class="tag shadow">投影图后处理</span> <span class="eid">EID 650 · 1 次绘制</span></h3>
+  <ul>
+    <li>采样 69250 → 输出到相邻的 <code>R8 512×512</code>（69251），6 索引全屏 quad</li>
+    <li>对投影 mask 做一次 blur / 展开，供主场景中英雄/地面采样</li>
+  </ul>
+</div>
+
+<div class="pass">
+  <h3>4. Colour Pass #2 <span class="tag scene">主场景</span> <span class="eid">EID 656–6202 · 289 次绘制（全帧 DC 大头，约占游戏帧 60%）</span></h3>
+  <table>
+    <tr><th>输出目标</th><td><code>R8G8B8A8 2132×1198</code>（69655）+ 深度（69656）。<b>动态分辨率</b>：仅为窗口 2558×1438 的 83.3%</td></tr>
+    <tr><th>Clear</th><td>灰蓝底色 (0.498, 0.518, 0.565) + 深度 + 模板</td></tr>
+  </table>
+  <h3>内部结构</h3>
+  <ul>
+    <li><b>背景</b>：开头 1 个 6-idx quad（天空盒/背景）</li>
+    <li><b>大网格</b>：棋盘地形 56508 / 56208 idx（带 512² lightmap + 雾效 <code>_ug_FogParam</code> + <code>_ug_EnableBlurReflection</code>）、62298 / 28824 / 27942 / 21915 idx 场景件</li>
+    <li><b>英雄棋子</b>：一批 ~9000 idx 的 draw。<b>相同索引数成对出现是棋盘上两个相同棋子</b>（自走棋同卡多张），不是重复渲染。
+      英雄 shader 很重：Fresnel 边缘光、受击变色 <code>_u_HurtColor</code>、金属度/粗糙度 remap、Glow、玩家配色 <code>_u_PlayerId</code> 等 22+ 个 PS 常量</li>
+    <li><b>中后段</b>：大量 <code>glDrawElementsBaseVertex</code> 小 draw（特效、召唤物、小兵）和成组的 2628 idx ×4（粒子批次）</li>
+  </ul>
+</div>
+
+<div class="pass">
+  <h3>5. Colour Pass #3 – #18 <span class="tag post">Bloom 金字塔</span> <span class="eid">EID 6203–6528 · 16 个全屏三角形</span></h3>
+  <ul>
+    <li>每个 pass 仅 1 个 3-索引全屏三角形，逐级降采样：533×299 → … → 16×9 → <b>8×4</b></li>
+    <li>第一级（EID 6219，45µs）为链上最贵，是 bright-pass / 首级降采样</li>
+    <li>随后逐级上采样回 <code>533×299</code>（184525），供合成阶段使用</li>
+    <li>16 级 ≈ 1 级 bright-pass + 7 级 down + 8 级 up，标准 Bloom 金字塔</li>
+  </ul>
+</div>
+
+<div class="pass">
+  <h3>6. Colour Pass #19 <span class="tag ui">后处理合成 + UI</span> <span class="eid">EID 6541–7805 · 125 次绘制</span></h3>
+  <table>
+    <tr><th>输出目标</th><td><code>R8G8B8A8 2558×1438</code>（3283）+ 深度（3284）</td></tr>
+    <tr><th>合成</th><td>EID 6544 全屏三角形采样：场景 69655（2132×1198）+ Bloom 结果 184525 + 自动曝光纹理（16×16，<code>_u_AutoExposureEnable</code>）—— <b>合成与上采样合一</b>，直接放大到窗口分辨率</td></tr>
+    <tr><th>UI</th><td>清深度/模板后画 123 个 UI 元素：绝大多数是 6-idx quad（血条、头像、按钮、伤害数字），少量大的（2430 idx 的小地图/文本批次等）</td></tr>
+    <tr><th>结尾</th><td><code>glFinish()</code>（1.49ms）—— 游戏侧渲染结束，等待 GPU 排空</td></tr>
+  </table>
+</div>
+
+<div class="pass">
+  <h3>7. Copy/Clear Pass #1 <span class="tag shell">外壳合成器拷贝</span> <span class="eid">EID 7832–7847</span></h3>
+  <ul>
+    <li>全屏 blit：<code>Texture 1580</code>（2558×1438，<b>上一帧的合成结果</b>，本帧无人写它）→ 3282（同尺寸）</li>
+    <li>后跟 3 个 <code>glFlush</code></li>
+  </ul>
+</div>
+
+<div class="pass">
+  <h3>8. Depth-only #2 / Colour #20 / EID 8569 / Colour #21 <span class="tag next">下一帧的开头（截帧跨帧）</span> <span class="eid">EID 8122–10123 · ~125 次绘制</span></h3>
+  <ul>
+    <li>阴影图（11 draw）、角色投影（42 draw，与 Pass #1 完全一致）、投影 blur（8569）、主场景不透明部分（70 draw，写入<b>同一个</b> 69655）</li>
+    <li>这是下一帧的内容被卷入本次截帧，<b>分析 DC 时应剔除</b></li>
+  </ul>
+</div>
+
+<div class="pass">
+  <h3>9. Colour Pass #22 + 帧尾 <span class="tag shell">外壳上屏链</span> <span class="eid">EID 10145–10255</span></h3>
+  <ul>
+    <li>清黑 → EID 10185：采样 3282，经 <code>_usk_RTAdjust</code> + <code>_uumatrix_S1_c0</code> <b>旋转矩阵</b>写入 <code>Texture 153</code>（1440×2560 竖屏）—— 横屏游戏画面转竖屏手机屏幕</li>
+    <li>清黑 → EID 10245：采样 153，带 <code>_uu_brightness</code> / <code>_uu_gamma</code>（亮度/伽马调节）画到 EGL backbuffer</li>
+    <li><code>SwapBuffers</code> present</li>
+    <li>其中夹杂 10214 / 10251 两个 9000-idx 游戏 draw（下一帧场景继续提交，与合成器交错）</li>
+  </ul>
+</div>
+
+<h2>三、整体渲染流程图</h2>
+
+<div class="flow"><span class="g">[游戏帧 N]</span>
+  阴影图 1024² D16 (11DC)
+  → 角色投影 512² R8 (42DC) → 投影 blur (1DC)
+  → 主场景 <span class="c">2132×1198</span> (289DC，83.3% 动态分辨率)
+  → Bloom 16 级金字塔 (16DC)
+  → 合成 + 自动曝光 + 上采样 <span class="c">2558×1438</span> + UI (125DC) → 3283  <span class="small">← 本帧成果，留给下次 present</span>
+
+<span class="o">[外壳合成器，呈现帧 N-1]</span>
+  1580 → 3282 → [旋转] 153 (1440×2560) → [亮度/伽马] Backbuffer → SwapBuffers
+
+<span class="r">[游戏帧 N+1 已开始（本截帧的尾部）]</span>
+  阴影图 → 角色投影 → 场景不透明部分 (~123DC，属下一帧)</div>
+
+<h2>四、主要观察与优化建议</h2>
+
+<div class="obs">
+  <div class="item">
+    <h4>1. Present 延迟一帧</h4>
+    本帧渲染成果 3283 在本帧无人读取，上屏的是上一帧的 1580 —— 游戏到显示有固定 1 帧延迟（外壳投屏架构所致）。
+  </div>
+  <div class="item">
+    <h4>2. 动态分辨率</h4>
+    场景按 83.3% 渲染（2132×1198），合成时一次性上采样到 2558×1438，省了全分辨率渲染的开销，做法合理。
+  </div>
+  <div class="item">
+    <h4>3. 同步点气泡</h4>
+    EID 656 invalidate 等待 10.8ms、8575 等 3.3ms、6541 等 2.8ms、glFinish 1.49ms + 帧尾 glFlush 1.97ms。
+    游戏渲染线程与外壳合成器在<b>同一 GL 上下文</b>交错提交（glFinish / glFlush 为分界），存在明显的 CPU-GPU 串行化，是帧时间的主要损耗点。
+  </div>
+  <div class="item">
+    <h4>4. 上屏链冗余</h4>
+    一帧 4 次全尺寸全屏 blit（合成→3283、1580→3282、3282→153、153→backbuffer），其中 3282 这一跳是同尺寸纯拷贝，理论上可省。
+  </div>
+  <div class="item">
+    <h4>5. 双轨阴影</h4>
+    阴影方案为 "1024² 方向光 shadow map + 512² 角色贴片投影" 双轨，投影图还多做一次全屏 blur（69250→69251），可考虑合并。
+  </div>
+  <div class="item">
+    <h4>6. DC 分布</h4>
+    主场景 289 DC 占游戏帧约 60%，其中英雄棋子 ~9000 idx 成对出现属于同卡多张棋子（非重复渲染）；
+    UI 123 DC 以 6-idx quad 为主，有合批空间。
+  </div>
+</div>
+
+<h2>五、泛光（Bloom）动态开关对比</h2>
+
+<p>对比截帧：<code>局内-有泛光.rdc</code>（rendertest 实例） vs <code>局内-无泛光.rdc</code>（renderdoc 实例）。
+另：本文档主体分析的 <code>局内-战斗-OpenGL.rdc</code> 也属于「有泛光」形态。</p>
+
+<table>
+  <tr><th style="width:180px">对比项</th><th>有泛光</th><th>无泛光</th></tr>
+  <tr><td>后处理链</td><td><b>16 级全屏 pass</b>（Colour Pass #3–#18）</td><td><b>仅 1 级全屏 pass</b>（Colour Pass #4，EID 5797）</td></tr>
+  <tr><td>链第一级（bright-pass）</td><td colspan="2">完全相同：同一 shader（阈值 <code>_u_Threshold</code> + 曝光 <code>_u_ExposureParams</code> + 颜色矩阵），采样场景图 2132×1198 → 半分辨率输出</td></tr>
+  <tr><td>金字塔模糊</td><td>bright-pass → 7 级降采样至 <b>8×4</b> → 8 级上采样回 <code>533×299</code>，共 15 级额外模糊</td><td><b>整体跳过</b>，bright-pass 输出（533×599）直接喂给合成</td></tr>
+  <tr><td>合成 pass</td><td colspan="2">相同 shader：采样场景图（slot 0 <code>_u_BlitTex</code>）+ Bloom 纹理（slot 1 <code>_u_BloomTex</code>）+ 16×16 自动曝光图，<code>_u_Bloom_Params</code> 控制强度/色调</td></tr>
+  <tr><td>Bloom 内容验证</td><td>金字塔 16×9 / 8×4 层像素<b>非零</b>（RGB 0–9，较弱但真实参与成像）</td><td>—</td></tr>
+  <tr><td>Clear 次数</td><td>44</td><td>21（少的主要是金字塔各级的 invalidate）</td></tr>
+</table>
+
+<h3>合成 shader 逻辑（两份截帧一致，SPIR-V 反汇编还原）</h3>
+<div class="flow">bloom = tex(_u_BloomTex, uv) * _u_Bloom_Params.x;          // Bloom 纹理 × 强度
+color = tex(_u_BlitTex, uv) + bloom * _u_Bloom_Params.yzw;  // 场景 + Bloom × 色调
+color *= exposure;    // 自动曝光（VS 采样 16×16 曝光图，逐像素插值）
+out   = min(color, 16);</div>
+
+<h3>结论</h3>
+<ul>
+  <li><b>泛光确为运行时动态开关</b>：关闭时游戏跳过整棵 15 级模糊金字塔，省 15 个全屏 pass + 15 次 FBO 切换/invalidate；bright-pass 仍保留（兼作自动曝光亮度种子），合成 shader 不变，靠 <code>_u_Bloom_Params</code> 屏蔽贡献。</li>
+  <li>金字塔各级分辨率都很小（≤533×299，最低 8×4），绝对填充开销不大，<b>主要成本在 pass/FBO 切换次数</b> —— 对 tile-based 移动 GPU 每次切换都有 tile 写回/失效代价，动态关闭的收益主要在这里。</li>
+  <li>两份截帧的 DC 总数差异（有泛光 437 vs 无泛光 508）来自战斗时刻场景内容不同，与泛光无关。</li>
+  <li class="small">注：GL 后端限制（<code>GetConstantBuffer</code> 不可用），无法读取无泛光时 <code>_u_Bloom_Params</code> 的具体数值；但金字塔整体消失已是结构级证据。</li>
+</ul>
+
+<p class="small">数据来源：RenderDoc 截帧经 Rendertest MCP / RenderDoc MCP 提取（draw 列表 / 管线状态 / 纹理元数据 / 像素数据 / SPIR-V 反汇编 / GPU 计时）。</p>
+
+</div>
+</body>
+</html>

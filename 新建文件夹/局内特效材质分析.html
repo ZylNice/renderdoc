@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋 局内 · 特效材质完整分析</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#2a1b3a,#1b3a3a);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#c9a8e8;font-size:14px}
+  main{max-width:1150px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #b07fe6;padding-left:12px;margin:40px 0 16px;color:#e4cfff}
+  h3{font-size:16px;color:#cda8f0;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:#221d2e;color:#cda8f0;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#cda8f0;font-size:12.5px}
+  pre{background:#0a0f1a;border:1px solid #26324c;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55;color:#c9d6ee}
+  .note{background:#1d1826;border-left:3px solid #b07fe6;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#e2d4f5;margin:12px 0}
+  .ok{background:#14301f;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .warn{background:#331a1a;border-left:3px solid #e05a5a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#f0c8c8;margin:12px 0}
+  .formula{background:#181422;border:1px dashed #5a3a7a;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:12.5px;color:#dcc8f5;white-space:pre-wrap}
+  .tag{display:inline-block;background:#241a33;border:1px solid #b07fe6;border-radius:4px;padding:0 8px;font-size:12px;color:#cda8f0;margin-right:4px}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>特效材质完整分析报告（局内战斗 · 有泛光）</h1>
+  <div class="sub">
+    截帧：<code>D:\Renderdoc 截帧\王者万象棋\OpengGL\局内-有泛光.rdc</code>（OpenGL ES）｜
+    覆盖 3 个特效家族 + 棋盘地面 + 泛光链：74064/74065 · 74621/74622 · 73297/73298 · 76520/76521 · 80666/80667 · 57736/57737
+  </div>
+</header>
+<main>
+
+<h2>0. 特效在帧中的分布</h2>
+<div class="note">局内特效集中在 <b>Colour Pass #2（317 子事件）</b>中后段：棋盘与英雄画完后，大量 6–7008 索引粒子 draw。特征：<b>同名特效多连发</b>（如 1476 索引六连发 = 多目标同名 Buff），技能大面片单发（7008 索引）。所有特效结束后接 <b>17 个全屏三角形的泛光链</b>（EID 7063–7388）。特效普遍与英雄共用 <code>_ug_ExposureScale</code> 曝光体系，高亮特效是泛光的主要亮斑来源。</div>
+<table>
+  <tr><th>家族</th><th>Shader (VS/PS)</th><th>代表 draw</th><th>纹理</th><th>定位</th></tr>
+  <tr><td><span class="tag">F1</span> 溶解扭曲族</td><td>74064 / 74065</td><td>3436（2484 索引）</td><td>4</td><td>通用技能粒子：4 组 UV 滚动 + 扭曲 + 溶解 + ramp</td></tr>
+  <tr><td><span class="tag">F2</span> 法线扭曲+Matcap</td><td>74621 / 74622</td><td>4403（7008 索引）</td><td>6 slot</td><td><b>地面技能圈/预警圈</b>：法线扭曲 + Matcap 高光 + 边缘收缩</td></tr>
+  <tr><td><span class="tag">F3</span> 扭曲+叠加层</td><td>73297 / 73298</td><td>5946 等 6 连发（1476 索引）</td><td>4</td><td>Buff 光环/受击叠加层：Add 层增亮</td></tr>
+  <tr><td><span class="tag">棋盘</span> 地面/道具</td><td>76520/76521 · 80666/80667</td><td>1804（27942）/ 1716（21915）</td><td>2×1024²+4×4</td><td>GameState 变色 + 暗角 + 模糊反射；80666 带顶点波动画</td></tr>
+  <tr><td><span class="tag">泛光</span> Bloom</td><td>57736 / 57737 等</td><td>7063–7388（17 个全屏三角形）</td><td>BloomSrcTex 2132×1198</td><td>阈值提取 + 降/升采样链 + 合成</td></tr>
+</table>
+
+<h2>1. F1 · 溶解扭曲族（VS 74064 / PS 74065）</h2>
+<h3>1.1 资源与常量</h3>
+<table>
+  <tr><th>纹理</th><td>slot0 <code>_u_MaskTex</code> 128²；slot1 主图 128²；slot2 256×128（扭曲/噪声）；slot3 <b>32×128 竖条 ramp</b>（渐变查找）</td></tr>
+  <tr><th>VS $Globals（14 项）</th><td>Main/Mask/Dist/Diss <b>4 组 RollUV+ST</b>；<code>_u_ZOffset</code>；<code>_u_Time</code>；MVP/OW/W2O 矩阵</td></tr>
+  <tr><th>PS $Globals（16 项）</th><td><code>_u_Color</code>；<code>_u_CurBlendMode</code>；扭曲 <code>_u_Dist</code>/<code>_u_Distortion_MainTex_Strength</code>/<code>_u_Distortion_DissolveTex</code>；溶解 <code>_u_DissFea</code>/<code>_u_DissInt</code>/<code>_u_DissolveChannel</code>/<code>_u_DissIntAffectedByVertexAlpha</code>；遮罩分工 <code>_u_Mask_Color</code>/<code>_u_Mask_Alpha</code>/<code>_u_Mask_Distortion</code>/<code>_u_Mask_Dissolve</code>/<code>_u_MaskChannel</code>；alpha 链 <code>_u_MainAlpha</code>/<code>_u_MultiplyAlpha</code></td></tr>
+</table>
+<h3>1.2 推测逻辑</h3>
+<div class="formula">distUV = uv + 扭曲图 × _u_Distortion_MainTex_Strength
+main = tex_main(distUV 滚动) × _u_Color × ramp(32×128)
+mask = tex_MaskTex(滚动)，按 Mask_* 开关把某通道(_u_MaskChannel)分配到 调色/alpha/扭曲量/溶解阈值
+dissolve = smoothstep(溶解图通道, _u_DissInt ± _u_DissFea)
+alpha = main.a × mask.a × dissolve × _u_MainAlpha × _u_MultiplyAlpha，按 _u_CurBlendMode 输出</div>
+
+<h2>2. F2 · 法线扭曲+Matcap 技能特效（VS 74621 / PS 74622）</h2>
+<h3>2.1 资源与常量</h3>
+<table>
+  <tr><th>纹理</th><td>6 slot：<code>_u_NormalTex</code>（128² 法线）+ 遮罩 128² + <b>512² Matcap</b> + 主图 128² + 叠加 128² + 4×4 查找表</td></tr>
+  <tr><th>VS $Globals（14 项）</th><td>同 F1：Main/Mask/Dist/Diss 4 组 UV 滚动 + ZOffset + 矩阵</td></tr>
+  <tr><th>PS $Globals（26 项）</th><td>= F1 全家桶 + 新增：<code>_u_IsUseNormalTex</code>/<code>_u_IsNormalDistortion</code>/<code>_u_NormalDistortIntensity</code>/<code>_u_NormalTexIntensity</code>/<code>_u_NormalTex_ST</code>（<b>法线贴图驱动扭曲</b>）；<code>_u_MatCapTexBlendMode</code>/<code>_u_MatcapColor</code>/<code>_u_MatcapTex_ST</code>（Matcap 上色混合）；<code>_u_EdgeShrinkRange</code>（<b>边缘收缩——技能圈消散动画</b>）；<code>_uhlslcc_mtx4x4unity_MatrixV</code>（视角空间计算）</td></tr>
+</table>
+<h3>2.2 推测逻辑</h3>
+<div class="formula">N = tex_NormalTex(uv) × _u_NormalTexIntensity        // 法线贴图
+distUV = uv + N.xy × _u_NormalDistortIntensity       // 法线扭曲（比 F1 的灰度扭曲更细腻）
+main = tex_main(distUV) × _u_Color × mask 分工
+matcap = tex_Matcap(N 相关 uv·ST) × _u_MatcapColor   // 技能圈高光流动感
+out = blend(main, matcap, _u_MatCapTexBlendMode)
+边缘 = smoothstep(_u_EdgeShrinkRange)                 // 技能圈边缘收缩消散
++ 溶解（DissInt）+ alpha 链 + CurBlendMode</div>
+<div class="note">7008 索引的大面片 + 法线扭曲 + Matcap + 边缘收缩，是<b>地面技能范围圈/预警圈</b>的典型配置（站在上面能看到流光与边缘呼吸）。</div>
+
+<h2>3. F3 · 扭曲+Add 叠加层（VS 73297 / PS 73298）</h2>
+<h3>3.1 资源与常量</h3>
+<table>
+  <tr><th>纹理</th><td>slot0 MaskTex 64²；slot1 主图 256²；slot2 扭曲图 128²；slot3 Add 叠加图 128²</td></tr>
+  <tr><th>VS $Globals（14 项）</th><td>Main/Mask/Dist/<b>Add</b> 四路 RollUV+ST（Diss 位换成 Add）+ ZOffset + 矩阵</td></tr>
+  <tr><th>PS $Globals（15 项）</th><td><code>_u_Color</code>/<code>_u_CurBlendMode</code>；扭曲三件套 <code>_u_Distortion_MainTex</code>/<code>_u_Distortion_AddTex</code>/<code>_u_Distortion_MainTex_Strength</code> + <code>_u_DistortionByMainColor</code>（<b>扭曲量受主图颜色驱动</b>）；<code>_u_Mask_AddTex</code>（遮罩控制 Add 层）；Mask_Color/Alpha/Distortion 分工；<code>_u_AlphaVal</code>/<code>_u_MainAlpha</code>/<code>_u_MultiplyAlpha</code></td></tr>
+</table>
+<h3>3.2 推测逻辑与定位</h3>
+<div class="formula">main = tex_main(distUV) × _u_Color
+add  = tex_Add(addUV 滚动) × Mask_AddTex 控制         // 第二贴图叠加增亮
+扭曲量 = f(主图颜色, _u_DistortionByMainColor)         // 亮处扭得更厉害（热浪感）
+out = (main + add) × alpha链(AlphaVal×MainAlpha×MultiplyAlpha)
+EID 5946/5950/6060/6128/6422/6468 六连发（1476 索引）= 多目标同名 Buff/光环叠加</div>
+
+<h2>4. 棋盘地面与道具（76520/76521、80666/80667）</h2>
+<h3>4.1 共用 PS（16 常量）</h3>
+<table>
+  <tr><th>分组</th><th>常量</th><th>含义</th></tr>
+  <tr><td>点亮系统</td><td><code>_u_ChangeValue</code> / <code>_u_IsSmoothChange</code></td><td><b>棋盘格逐格点亮</b>：ChangeValue 与 LightOnTex.a（阈值 mask）比较扫动；IsSmoothChange 选平滑/硬阶跃</td></tr>
+  <tr><td>状态系统</td><td><code>_u_GameState</code> / <code>_u_StateChangeValue</code></td><td><b>GameState==1（战斗）</b>时向 LightenStateTex 采样色 lerp（StateChangeValue 控制进度）</td></tr>
+  <tr><td>裁剪</td><td><code>_u_CutOffValue</code> / <code>_u_IsAlphaTest</code></td><td>镂空裁剪（格子缝隙/花纹），alpha&lt;CutOff 即 discard</td></tr>
+  <tr><td>暗角</td><td><code>_u_Vignette_Params1/2</code></td><td><b>前向逐像素屏幕空间暗角</b>（详见 4.2），Params2.xy=中心 / z=强度 / w=幂次，Params1.rgb=边缘色 / w=XY比例</td></tr>
+  <tr><td>反射门控</td><td><code>_ug_EnableBlurReflection</code> / <code>_ug_ScreenParams</code></td><td>开模糊反射时<b>跳过暗角</b>（反射 RT 已含）；ScreenParams 供暗角算屏幕 UV</td></tr>
+  <tr><td>双 UV</td><td><code>_u_Use2UV</code> / <code>_u_MainTexUse2UV</code> / <code>_u_LightenTexUse2UV</code></td><td>各贴图独立选 TEXCOORD0.xy 或 .zw</td></tr>
+  <tr><td>纹理</td><td Colspan="2"><code>_u_MainTex</code> 1024²（熄灭格主图）+ <code>_u_LightOnTex</code> 1024²（点亮层，<b>alpha=逐格点亮阈值 mask</b>）+ <code>_u_LightenStateTex</code> 4×4（战斗状态提亮 LUT）</td></tr>
+</table>
+<h3>4.2 已验证的像素逻辑（SPIR-V 反编译）</h3>
+<div class="formula">t = (_u_ChangeValue &gt;= LightOnTex.a) ? 1 : 0;   // IsSmoothChange 时用平滑值
+color = lerp(MainTex.rgb, LightOnTex.rgb, t);     // 熄灭格 → 点亮格
+if (_u_GameState == 1) color.rgb = lerp(color.rgb, tex(LightenStateTex).rgb, _u_StateChangeValue);
+color *= _u_Color;  if (_u_IsAlphaTest &amp;&amp; color.a×_u_MainAlpha &lt; _u_CutOffValue) discard;
+
+// 暗角（前向 pass 内逐像素，非后处理）：
+if (_u_Vignette_Params2.z &gt; 0) {
+    sUV = gl_FragCoord.xy / _ug_ScreenParams.xy;       // 屏幕 UV（ProjectionParams.x 控 Y 翻转）
+    d = abs(sUV - Params2.xy) × Params2.z;  d.x *= Params1.w;
+    v = pow(max(1 − dot(d,d), 0), Params2.w);
+    vig = lerp(Params1.rgb, vec3(1), v);               // 中心白、边缘 Params1.rgb
+    out.rgb = (_ug_EnableBlurReflection ≤ 0.5) ? color.rgb × vig : color.rgb;  // 反射门控
+}</div>
+<div class="note">暗角只压棋盘地面、不压英雄/特效（刻意聚焦棋盘中心）；开模糊反射时跳过暗角避免压两次。因此"关暗角"应把 <code>vig</code> 替换 <code>vec3(1.0)</code>，而不是动反射开关。</div>
+<h3>4.3 80666 变体：VS 顶点波动画</h3>
+<div class="formula">VS 新增：_u_Direction / _u_Length / _u_RippleFreq / _u_Strength / _u_OffsetRadio
+pos += Direction · sin(t·RippleFreq + 相位) · Strength · (沿 Length 衰减, OffsetRadio 偏心)
+典型用途：旗帜/帷幔/水面波纹类场景道具（EID 1716，21915 索引）</div>
+
+<h2>5. 泛光（Bloom）链 · 57736/57737</h2>
+<h3>5.1 结构</h3>
+<div class="formula">17 个全屏三角形 draw（EID 7063–7388，各 3 索引），分布于 Colour Pass #3–#18：
+首 pass（EID 7063）阈值提取：
+  输入 _u_BloomSrcTex = 2132×1198 全分辨率场景 RT（ResourceId 80804）
+  常量：_u_Threshold（亮度阈值）/ _u_Params / _u_PostExposure（后曝光）
+      / _u_ExposureParams / _ug_ExposureScale / g_ColorMatrix（调色矩阵）
+中间：逐级降采样模糊 → 逐级上采样累加（每层 1 pass = 3 事件：SetRT+Draw+恢复）
+末 pass：合成回主 RT（泛光叠加到场景）</div>
+<div class="note">泛光链路结论：阈值提取 RT 中仅剩超阈值亮斑（技能/高光/英雄 Glow 为主要亮斑源），逐级扩散后合成回主 RT；特效高亮与英雄 HDR 输出是泛光强度的直接上游。</div>
+
+</main>
+<footer>由 RenderDoc MCP（renderdoc）截帧分析生成 ｜ 局内-有泛光.rdc ｜ 特效 F1 74064/74065 · F2 74621/74622 · F3 73297/73298 ｜ 棋盘 76520/76521 · 80666/80667 ｜ 泛光 57736/57737</footer>
+</body>
+</html>

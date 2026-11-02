@@ -1,0 +1,132 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋 · 场景背景 FS 分析（单贴图 + 暗角 + 高度淡出）</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#143a2e,#1b2a4a);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#9fb2d8;font-size:14px}
+  main{max-width:1080px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #3ad0a0;padding-left:12px;margin:40px 0 16px;color:#c9f5e4}
+  h3{font-size:16px;color:#8fe3c1;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#17352c;color:#8fe3c1;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#ffd479;font-size:13px}
+  pre{background:#0a0f1a;border:1px solid #26324c;border-radius:8px;padding:16px;overflow-x:auto;font-size:13px;line-height:1.55;color:#c9d6ee}
+  .note{background:#1a2438;border-left:3px solid #e0a53a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#e8d9b8;margin:12px 0}
+  .ok{background:#14301f;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .formula{background:#101c18;border:1px dashed #2e6b54;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:13px;color:#9fe8c1}
+  .flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0;font-size:13px}
+  .flow .step{background:#17352c;border:1px solid #2e6b54;border-radius:6px;padding:6px 12px}
+  .flow .arrow{color:#3ad0a0}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>场景背景像素着色器（FS）分析报告</h1>
+  <div class="sub">
+    截帧：<code>D:/Renderdoc 截帧/王者万象棋/局内-战斗中（战斗特效）.rdc</code> ｜
+    归属：EID 1622（44185→44175 索引 ≈ 14725 三角形，帧内最大网格）｜
+    Shader：<code>ResourceId::1589840</code>（Pixel，Vulkan GLSL460 → SPIR-V）
+  </div>
+</header>
+<main>
+
+<h2>0. 归属判定：这不是英雄 FS</h2>
+<div class="note">与英雄 FS（<code>1587007</code>）对比：英雄 FS 有 <b>7 张纹理 + 444 字节常量（35 变量）</b>；本 FS 只有 <b>1 张纹理 + 48 字节常量（4 变量）</b>。两者的<b>输出抖动尾巴完全一致</b>（SpecConstant 棋盘格 dither），属引擎统一拼接的 epilogue，容易因此误认为是同一 shader。</div>
+<table>
+  <tr><th>验证项</th><th>用户提供的 GLSL</th><th>截帧 EID 1622 管线状态</th><th>结论</th></tr>
+  <tr><td>纹理</td><td>1× sampler2D（set1/binding0）</td><td>1× 1024×1024 R8G8B8A8（<code>1590821</code>）</td><td>✔ 一致</td></tr>
+  <tr><td>材质常量</td><td>float + float + vec4 + vec4（48B）</td><td>48B / 4 变量（<code>uniforms83</code>）</td><td>✔ 一致</td></tr>
+  <tr><td>Push Constant</td><td>uvec2+vec2+4×uint（32B）</td><td>32B / 6 变量（引擎通用）</td><td>✔ 一致</td></tr>
+  <tr><td>SpecConstant</td><td>constant_id=0 抖动开关</td><td>specID0</td><td>✔ 一致</td></tr>
+</table>
+<div class="ok"><b>结论：该 FS 属于场景背景/竞技场底座网格（EID 1622，44175 索引，全帧最大 mesh）</b>——一个「单贴图 + 屏幕空间暗角 + 高度淡出 alpha」的轻量化背景材质。</div>
+
+<h2>1. 接口定义</h2>
+<table>
+  <tr><th>接口</th><th>内容</th><th>用途</th></tr>
+  <tr><td><code>in _62</code> (loc0, vec4)</td><td>zw = UV</td><td>主贴图采样坐标（xy 未用，顶点阶段复用了通道）</td></tr>
+  <tr><td><code>in _63</code> (loc1, vec4)</td><td>裁剪空间位置</td><td><code>xy/w</code> 得屏幕 NDC，驱动暗角</td></tr>
+  <tr><td><code>in _61</code> (loc2, vec3)</td><td>世界/本地坐标</td><td><code>.y</code> 高度，驱动 alpha 淡出</td></tr>
+  <tr><td><code>_60</code> (set1/binding0)</td><td>1024×1024 贴图</td><td>背景 Albedo，<code>textureLod(...,0)</code> 强制 0 级 mip</td></tr>
+  <tr><td><code>_83._m0</code></td><td>float 模式开关</td><td>≤0.5：启用暗角染色；＞0.5：启用高度淡出 alpha</td></tr>
+  <tr><td><code>_83._m1</code></td><td>float 淡出高度</td><td>alpha = 1 − clamp(y/_m1)</td></tr>
+  <tr><td><code>_83._m2</code></td><td>vec4</td><td>rgb = 暗角边缘颜色；w = 宽高比校正系数</td></tr>
+  <tr><td><code>_83._m3</code></td><td>vec4</td><td>xy = 暗角中心(NDC)；z = 暗角范围/开关；w = 暗角幂指数</td></tr>
+</table>
+
+<h2>2. 逐段拆解</h2>
+<div class="flow">
+  <span class="step">采样贴图(lod 0)</span><span class="arrow">→</span>
+  <span class="step">屏幕 NDC 径向暗角（可选）</span><span class="arrow">→</span>
+  <span class="step">高度淡出 alpha（可选）</span><span class="arrow">→</span>
+  <span class="step">引擎统一输出抖动</span>
+</div>
+
+<h3>① 主采样</h3>
+<div class="formula">albedo = textureLod(T0, _62.zw, 0).rgb&nbsp;&nbsp;// 强制 mip 0：背景是恒定距离的大平面，不需要 mip 链，省内存带宽</div>
+
+<h3>② 屏幕空间径向暗角（Vignette）—— 当 _m3.z &gt; 0</h3>
+<div class="formula">ndc = _63.xy / _63.w&nbsp;&nbsp;// 透视除法得 NDC（VS 直接透传了裁剪坐标）<br>
+p&nbsp;&nbsp;= |ndc − _m3.xy| · _m3.z&nbsp;&nbsp;// 相对暗角中心的偏移 × 范围缩放<br>
+r² = (p.x · _m2.w)² + p.y²&nbsp;&nbsp;// _m2.w 做宽高比校正，得到圆形而非椭圆暗角<br>
+v&nbsp;&nbsp;= pow(max(1 − r², 0), _m3.w)&nbsp;&nbsp;// log2/exp2 实现的幂曲线衰减<br>
+tint = lerp(_m2.rgb, vec3(1), v)&nbsp;&nbsp;// 中心=白(不变)，边缘=_m2 暗角色<br>
+color = albedo · tint&nbsp;&nbsp;（仅当 _m0 ≤ 0.5 时启用，否则直通 albedo）</div>
+<p>把视线聚焦到竞技场中央：背景边缘向 <code>_m2.rgb</code> 压暗/染色，是俯视竞技场的标准构图手法。暗角在<b>屏幕空间</b>计算（用 NDC 而非世界坐标），所以暗角始终贴合画面边缘，与相机运动无关。</p>
+
+<h3>③ 高度淡出 Alpha —— 当 _m0 &gt; 0.5</h3>
+<div class="formula">alpha = (_m0 &gt; 0.5) ? 1 − clamp(worldY / _m1, 0, 1) : 1.0</div>
+<p>按高度线性消隐：越低越实，越高越透明。用于背景底座上沿（如围栏/远景立面）向上渐隐融入天空，避免硬切边。<code>_m0</code> 一物两用：同时决定「暗角是否染色」与「alpha 模式」，是该材质的变体开关。</p>
+
+<h3>④ 引擎统一尾巴：棋盘格输出抖动（SpecConstant 控制）</h3>
+<div class="formula">if (specID0 != 0) {<br>
+&nbsp;&nbsp;d = {−0.0117, +0.0039, +0.0117, −0.0039}[((x&amp;1)&lt;&lt;1)|(y&amp;1)]&nbsp;&nbsp;// 2×2 棋盘<br>
+&nbsp;&nbsp;color += d × (specID0&amp;3 == 1 ? 2 : specID0&amp;3 == 2 ? 1 : 0.5，蓝噪声通道分布)<br>
+}</div>
+<p>与英雄 FS 末尾完全相同的 epilogue——引擎在所有材质末尾统一拼接的输出抖动，抑制 8bit 输出色带。这也解释了为什么反编译两个 shader 会「长得很像」。</p>
+
+<h2>3. 重建的等价源码</h2>
+<pre>// 背景材质 FS（语义重建）
+vec3 albedo = textureLod(uTex, uv, 0.0).rgb;
+vec3 color  = albedo;
+
+if (vignetteScale > 0.0) {                 // _m3.z
+    vec2 ndc = clipPos.xy / clipPos.w;
+    vec2 p   = abs(ndc - vignetteCenter) * vignetteScale;   // _m3.xy/z
+    float r2 = (p.x*aspect)*(p.x*aspect) + p.y*p.y;         // _m2.w
+    float v  = pow(max(1.0 - r2, 0.0), vignettePow);        // _m3.w
+    vec3 tint = mix(vignetteColor, vec3(1.0), v);           // _m2.rgb
+    if (mode <= 0.5) color = albedo * tint;                 // _m0
+}
+
+float alpha = (mode > 0.5)                 // _m0
+            ? 1.0 - clamp(worldY / fadeHeight, 0.0, 1.0)   // _m1
+            : 1.0;
+
+outColor = vec4(color + outputDither(), alpha);</pre>
+
+<h2>4. 与英雄 FS 的对比</h2>
+<table>
+  <tr><th>维度</th><th>本 FS（背景 1589840）</th><th>英雄 FS（1587007）</th></tr>
+  <tr><td>纹理数</td><td>1（1024²）</td><td>7（Albedo/遮罩/法线/Ramp/LUT 等）</td></tr>
+  <tr><td>光照</td><td>无（纯贴图）</td><td>GGX + Matcap Ramp + SH9 + BRDF LUT</td></tr>
+  <tr><td>特色项</td><td>屏幕暗角 + 高度淡出</td><td>Bayer 抖动镂空 + 边缘光 + 双雾 + Tonemap</td></tr>
+  <tr><td>常量</td><td>48B / 4 变量</td><td>444B / 35 变量</td></tr>
+  <tr><td>共同尾巴</td><td colspan="2">SpecConstant 棋盘格输出抖动（引擎统一 epilogue）</td></tr>
+</table>
+
+<h2>5. 结论</h2>
+<div class="ok">这是<b>场景背景材质</b>：一张 1024² 贴图打天下，靠「屏幕空间径向暗角」聚焦视线、「高度淡出」消隐上沿，零光照零法线，成本极低。它与英雄 FS 的唯一共性是引擎统一拼接的输出抖动尾巴。帧内背景（EID 1622，约 1.47 万三角形）与英雄（EID 1674 等，约 2.8k 三角形/只）形成明显的「重角色、轻场景」资源分配策略——符合 Q 版自走棋俯视角的表现需求。</div>
+</main>
+<footer>由 RenderDoc MCP（rendertest）截帧分析生成 ｜ EID 1622 ｜ Shader ResourceId::1589840</footer>
+</body>
+</html>

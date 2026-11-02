@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋·局内 — 实时阴影实现分析（英雄地面投影） 20260929 修订版</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --border:#30363d;
+    --fg:#e6edf3; --fg-dim:#8b949e; --accent:#58a6ff; --good:#3fb950;
+    --warn:#d29922; --violet:#bc8cff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.65;padding:24px;max-width:1400px;margin:0 auto}
+  h1{font-size:24px;border-bottom:2px solid var(--violet);padding-bottom:10px;margin-bottom:6px}
+  h2{font-size:19px;color:var(--accent);margin:30px 0 10px;border-left:4px solid var(--accent);padding-left:10px}
+  h3{font-size:15px;color:var(--violet);margin:16px 0 6px}
+  .meta{color:var(--fg-dim);font-size:13px;margin-bottom:20px}
+  .toc{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 20px;margin:16px 0;font-size:13.5px}
+  .toc a{color:var(--accent);text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  pre{background:#0a0e14;border:1px solid var(--border);border-radius:8px;padding:14px 16px;overflow-x:auto;font-family:Consolas,"Cascadia Mono",monospace;font-size:12px;color:#c9d1d9;margin:10px 0;line-height:1.45}
+  .note{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--warn);border-radius:6px;padding:12px 16px;margin:12px 0;font-size:13.5px}
+  .note.green{border-left-color:var(--good)} .note.blue{border-left-color:var(--accent)} .note.violet{border-left-color:var(--violet)}
+  code{background:#21262d;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12.5px;color:#ffa657}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+  th{background:var(--panel2);color:var(--accent);text-align:left;padding:8px 10px;border:1px solid var(--border)}
+  td{padding:6px 10px;border:1px solid var(--border);vertical-align:top}
+  .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#33254d;color:var(--violet);margin-right:4px}
+  .foot{margin-top:36px;padding-top:14px;border-top:1px solid var(--border);color:var(--fg-dim);font-size:12px}
+  ul{margin:8px 0 8px 22px} li{margin:3px 0}
+  .kpi{display:flex;gap:14px;flex-wrap:wrap;margin:14px 0}
+  .kpi div{flex:1;min-width:170px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 16px;text-align:center}
+  .kpi b{display:block;font-size:20px;color:var(--accent)}
+  .kpi span{font-size:12px;color:var(--fg-dim)}
+</style>
+</head>
+<body>
+
+<h1>《王者万象棋》局内 — 实时阴影实现分析：英雄向地面的投影（修订版）</h1>
+<div class="meta">
+  截帧：<code>D:\Renderdoc 截帧\王者万象棋\OpengGL\局内-有泛光.rdc</code> · OpenGL ES (GLES3) · 设备 OnePlus PLK110 / Adreno 840 / Android 16
+  · RenderDoc MCP（官方 renderdoc 实例）· 2026-09-29 ·
+  <b style="color:var(--warn)">修订说明：初版将"英雄地面投射"归因于 E481/E500 投影网格写入 CSM；经用户在 RenderDoc 中指认 E2328 为角色阴影地面投射的实现，已修正——角色地面投射为<b>贴地 Decal 面片</b>方案。</b>
+</div>
+
+<div class="toc">
+  <b>目录</b><br>
+  ① <a href="#s1">结论速览（修正后）</a><br>
+  ② <a href="#s2">两层阴影体系：CSM（静态）+ 贴地 Decal（角色）</a><br>
+  ③ <a href="#s3">CSM 阴影贴图渲染（静态遮挡体 · URP ShadowCasterPass）</a><br>
+  ④ <a href="#s4">英雄向地面的投射：E2328 贴地 Decal（核心，修订）</a><br>
+  ⑤ <a href="#s5">地面接收端：PCF 采样 + 法线偏移 + 距离衰减（仅服务静态 CSM）</a><br>
+  ⑥ <a href="#s6">E481/E500 投影网格的重新定位与其余相关项</a><br>
+  ⑦ <a href="#s7">可借鉴的工程要点</a><br>
+  ⑧ <a href="#s8">数据来源、取证方法与未决项</a>
+</div>
+
+<h2 id="s1">① 结论速览（修正后）</h2>
+<div class="kpi">
+  <div><b>静态阴影</b><span>单级 CSM 1024×1024 D16（296207）· 6 遮挡体 · 3×3 tent PCF</span></div>
+  <div><b>角色地面投射</b><span>贴地 Decal 面片（E2328 · 741 索引 · ZOffset + 软渐变纹理 + Mask）</span></div>
+  <div><b>9 处</b><span>同族富变体贴片（74064，含 E2328）实例数</span></div>
+  <div><b>0</b><span>英雄本体/材质参与的 shadowmap 采样（英雄不接收阴影）</span></div>
+</div>
+<div class="note green">
+  <b>修正后的一句话结论：</b>实时阴影分两层。
+  <b>静态场景阴影</b>走 CSM（1024×1024 D16，URP ShadowCasterPass 渲染 6 个遮挡体，地面材质硬件 Dref + 3×3 tent PCF + 距离衰减采样）。
+  <b>英雄向地面的投射不走 shadowmap</b>，而是 <b>E2328 所在的"特效贴片族"贴地 Decal</b>：一张 741 索引的贴地网格，
+  顶点着色器用 <code>_u_ZOffset</code> 把面片朝相机拉近消 Z-fighting，像素着色器采样 128×128 软渐变主纹理（305967）+ 256×256 遮罩（305951），
+  以 <code>_u_CurBlendMode</code> 控制的混合模式 + 顶点色 alpha 画在角色脚下。
+</div>
+<div class="note">
+  <b>初版勘误：</b>初版依据 E481/E500（<code>_ug_ShadowExpandScale</code>/<code>_ug_HeroShadowIntensity</code>、position-only 网格）推断"proxy 写入 CSM 成像"，
+  该写入目标始终未取得直接证据（工具缺陷），属<b>过度推断</b>；E2328 才是可见的角色地面投射实现（用户在 RenderDoc 中直接指认）。E481/E500 的角色定位见 ⑥。
+</div>
+
+<h2 id="s2">② 两层阴影体系</h2>
+<pre>
+┌─ 静态层（CSM，服务场景物互投影） ─────────────────────────────┐
+│ E349~E458  6 个静态遮挡体 → 1024×1024 D16 (296207)          │
+│ E1408/E1433 地面/棋盘材质：Dref PCF 采样 + 距离衰减 + 法线偏移 │
+└──────────────────────────────────────────────────────────────┘
+┌─ 角色层（贴地 Decal，透明队列） ─────────────────────────────┐
+│ E2228(741,简化变体) E2328(741) E2329(24) …（富变体共约 9 处） │
+│ 贴地网格 + ZOffset 防穿 + 软渐变纹理 + Mask + 混合模式        │
+│ 由用户指认 E2328 为角色阴影地面投射实例                        │
+└──────────────────────────────────────────────────────────────┘
+英雄本体：不进 caster 列表、材质不采样 shadowmap（不接收也不方向性投影）
+</pre>
+
+<h2 id="s3">③ CSM 阴影贴图渲染（静态遮挡体 · URP ShadowCasterPass）</h2>
+<p>六个 caster（E349/E367/E383/E409/E432/E458，90/288/2616/2868/150/6405 索引）的 VS 是逐行级别的 URP <code>ShadowCasterPass.hlsl</code>（glslang→SPIR-V）：</p>
+<ul>
+  <li><b>法线偏移</b>：视空间法线按 <code>_ug_DepthBias</code>（x=斜率、y=单位、z=Z 偏移）slope-scaled 偏移</li>
+  <li><b>Pancaking</b>：<code>_ug_ShadowPancaking</code> 开启时近平面前顶点 z 钳到 1</li>
+  <li><b>正交分支</b>：<code>_ug_OrthoCamera</code> + <code>_ug_dxCamera/_ug_dyCamera</code> 修正视向量边缘因子</li>
+  <li>PS 为空壳（输出白色常量），有效输出是深度（D16）</li>
+</ul>
+<p>地面材质（E1408/E1433）的阴影输入<b>只有</b> 296207 这张 D16——即 CSM 只承载静态遮挡体。</p>
+
+<h2 id="s4">④ 英雄向地面的投射：E2328 贴地 Decal（核心）</h2>
+<p>E2328（<code>glDrawElements</code>，741 索引）位于主场景 pass 的透明段（E2228~E2343 一带），材质为通用"特效贴片"族的富变体（VS 74064 / PS 74065）。</p>
+
+<h3>4.1 顶点着色器（74064）：贴地 + 深度偏移</h3>
+<pre>// 核心三步（完整反汇编见取证）：
+// ① 计算物体缩放归一因子（WorldToObject 列向量点积自身 → sqrt → 1/len，兼容非均匀缩放）
+// ② 深度偏移量：zoff = _u_ZOffset × (−2) × _u_ProjectionParams.y × normFactor
+clip = unity_MatrixVP × (unity_ObjectToWorld × POSITION0);
+// ③ 把面片朝相机拉近（消与地面的 Z-fighting）：
+gl_Position.z = clip.z + zoff / clip.w;
+// 另有 4 组滚动 UV（MainRollUV/MaskRollUV/DissRollUV/DistRollUV × _u_Time，fract）
+</pre>
+
+<h3>4.2 像素着色器（74065）：软渐变 × 遮罩 × 溶解边缘 × 混合模式</h3>
+<pre>dist   = DistTex.uv × 2 − 1;                         // 可选 UV 扭曲
+mask   = channel(MaskTex, _u_MaskChannel);            // 256×256 遮罩，通道可选
+main   = MainTex(uv + dist×Distortion_MainTex_Strength);  // 128×128 软渐变（影子的"形"）
+diss   = smoothstep(edge) 溶解边缘（×x²(−2x+3) 曲线, _u_DissFea 控边宽）   // 出场/消散动画
+alpha  = main.a × vertexColor.a × _u_MainAlpha × mask × diss, clamp(0,1)
+color  = (_u_CurBlendMode == 4) ? main.rgb × _u_Color(遮罩混色 lerp)   // 预乘式混合
+                                : main.rgb × _u_Color
+out = float4(color, alpha × _u_MultiplyAlpha)
+</pre>
+<ul>
+  <li><b>影子的形状与浓淡完全由资产驱动</b>：MainTex（305967，128×128 软渐变圆斑）给出软边，MaskTex（305951，256×256）裁形/控透明度，<code>_u_Color</code> 给暗色，<code>_u_AlphaVal/_u_MainAlpha/_u_MultiplyAlpha</code> 控浓度。</li>
+  <li><b>动画能力</b>：滚动 UV（流动感）、溶解边缘（出生/死亡渐显渐隐）、UV 扭曲——这是把角色投影做进<b>特效系统</b>而非渲染管线的好处：策划/美术可纯配置。</li>
+  <li><b>网格</b>：741 索引（247 三角形）——比 4 顶点 quad 细分得多，用于顶点级 alpha 渐隐（如边缘羽化、跟随棋格形状）；另有 24 索引小号实例（E2329）。</li>
+</ul>
+
+<h3>4.3 同族贴片分布</h3>
+<table>
+<tr><th>变体</th><th>VS/PS</th><th>特征</th><th>实例</th></tr>
+<tr><td>富变体（E2328 所属）</td><td>74064/74065</td><td>Mask+Dissolve+Distortion+滚动 UV+ZOffset</td><td>约 9 处（E2328/E2329 已逐事件确认；find_draws_by_shader 另报 7 处，EID 有偏移）</td></tr>
+<tr><td>简化变体</td><td>16760/16761</td><td>仅 MainTex + _u_Color/_u_AlphaVal/_u_CurBlendMode + ZOffset</td><td>82 处（通用贴片，非全部为阴影；E2228 741 索引为其中之一，E8533/E8522 帧末展示渲染亦用此族）</td></tr>
+</table>
+
+<h2 id="s5">⑤ 地面接收端（CSM 采样，仅静态层）</h2>
+<pre>// 地面材质 PS (76631 @ E1408/E1433) 阴影部分：
+shadowPos = positionWS + normalWS × (2 − NdotL) × CSMNormalBias.x × 2;   // 法线偏移消自阴影
+clip = mul(g_CSMShadowMatrices, shadowPos);
+fade = clamp(lightZ × _ug_CSMDistanceFade.x + _ug_CSMDistanceFade.y);   // 距离淡出
+if (fade &lt; 1 && |clip.xy/w| &lt; 0.9922) {
+    uv = clip.xy × _ug_CSMUvScaleOffset.xy + zw;
+    // 4 × ImageSampleDrefExplicitLod（sampler2DShadow 硬件 2×2 PCF）× 双线性 tent 权重 ≈ 3×3
+}
+之后：× 圆盘光(LightDirectionAndAngleOffset) × SunOcclusion(4×4) + Lightmap GI + GGX Envmap + 曝光 + tonemap
+</pre>
+
+<h2 id="s6">⑥ E481/E500 投影网格的重新定位与其余相关项</h2>
+<ul>
+  <li><b>E481（108 索引）/ E500（2646 索引）</b>：VS 仅读 POSITION0、按 <code>_ug_ShadowExpandScale</code> 缩放后经 ObjectToWorld→MatrixVP；PS 输出单通道常量（<code>_ug_HeroShadowIntensity</code>，E481 变体为 <code>1 + _u_ProjectorShadowStrength×(强度−1)</code>）。<b>写入目标未取得直接证据</b>（get_draw_call_details 对该段事件失效）。在"E2328 已确认为角色地面投射"的前提下，二者更可能是：<b>CSM 的角色 proxy 补充（方向性投影），或写入某离屏遮罩的辅助绘制</b>——本帧 2 个实例恰与 2 个富变体贴片（741 索引 ×2：E2228/E2328）数量对应，亦可能分别服务不同单位。保留为待验证项，不再作为角色地面投射的实现依据。</li>
+  <li><b>英雄本体不接收阴影</b>：英雄材质（75310/75311）无任何 shadowmap 绑定，仅 <code>_ug_HeroLightDirection</code> 固定方向光 + rim/fresnel。</li>
+  <li><b>帧末 "Depth-only Pass #1"（E8588）与阴影无关</b>：静态场景深度重建（粒子软淡出/模糊反射用）。</li>
+  <li>GPU 计时计数器对本段无数据，未量化耗时。</li>
+</ul>
+
+<h2 id="s7">⑦ 可借鉴的工程要点</h2>
+<ul>
+  <li><b>角色投影做进特效/Decal 系统而非 shadowmap 管线</b>：贴地面片 + ZOffset + 软渐变纹理，成本恒定（一张 741 索引网格 + 2 次小纹理采样），不受光源角度/场景遮挡影响，且直接获得特效系的动画能力（溶解出场、滚动、扭曲、遮罩裁形）——对"单位站在棋格上"的自走棋/棋盘类游戏是性价比极高的方案。</li>
+  <li><b>ZOffset 贴地技巧</b>：<code>clip.z += _u_ZOffset×(−2)×ProjectionParams.y/w</code>（含非均匀缩放归一），一个参数解决 decal 与地面的 Z-fighting，无需模板缓冲。</li>
+  <li><b>细分贴片网格（741 索引）+ 顶点色 alpha</b>：比 4 顶点 quad 多出顶点级羽化/异形裁剪能力，仍远便宜于角色 mesh。</li>
+  <li><b>双层分工</b>：静态物走 CSM（正确互遮挡、软 PCF），角色走贴地 decal（稳定、可控、可动画）——避免把高频移动的蒙皮角色塞进每帧 shadowmap caster 列表的顶点/动画开销。</li>
+  <li><b>英雄不接收阴影</b>：省角色材质里的 shadowmap 采样与偏移计算，用固定方向光 + rim 补偿体积感。</li>
+</ul>
+
+<h2 id="s8">⑧ 数据来源、取证方法与未决项</h2>
+<ul>
+  <li>用户在 RenderDoc 中直接指认 <b>E2328 为角色阴影地面投射</b>（本报告修订的直接依据）。</li>
+  <li>E2328/E2329/E2228 材质与绑定：<code>get_pipeline_state</code>；算法：<code>get_shader_source</code>（VS 74064 / PS 74065 / 简化变体 16760/16761 全文；caster VS 73507、地面 PS 76631、英雄 PS 75311 等 30+ 事件）。</li>
+  <li>同族实例分布：<code>find_draws_by_shader</code>（注意：该工具返回的 EID 与事件树存在偏移，已按逐事件 pipeline_state 交叉校准）。</li>
+  <li><b>工具缺陷记录</b>：<code>get_draw_call_details</code> 对 E284~E500 及帧末段事件持续返回 "No action"（导致 E481/E500 写入目标无法直接取证）；<code>find_draws_by_resource</code> 在 GL 截帧下全量匹配；常量缓冲数值不可读（GetConstantBuffer 缺失）。</li>
+  <li><b>未决项</b>：① E481/E500 的实际写入目标与用途（CSM proxy / 离屏遮罩 / 其它）；② 富变体 9 处贴片中哪些是角色阴影、哪些是其它地面特效（贴片族通用）；③ 阴影/贴片段无 GPU 计时数据。</li>
+</ul>
+
+<div class="foot">
+  王者万象棋（外部参照游戏，包名 com.tencent.tmgp.osgame）实时阴影实现分析 · 修订版 2026-09-29 · RenderDoc MCP 官方实例 ·
+  同目录系列：<a href="王者万象棋_局内_Bloom实现分析_20260929.html" style="color:var(--accent)">王者万象棋·Bloom 实现分析</a> ·
+  <a href="终末地_大地图_渲染流程分析_20260928.html" style="color:var(--accent)">终末地·大地图渲染流程分析</a> ·
+  本报告结论基于单帧取证 + 用户 E2328 指认；阴影参数（强度/缩放/偏移）运行时可变。
+</div>
+
+</body>
+</html>

@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>终末地·大地图 渲染流程分析 — RenderDoc 截帧 20260928</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --border:#30363d;
+    --fg:#e6edf3; --fg-dim:#8b949e; --accent:#58a6ff; --accent2:#f78166;
+    --good:#3fb950; --warn:#d29922; --bad:#f85149; --violet:#bc8cff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.65;padding:24px;max-width:1280px;margin:0 auto}
+  h1{font-size:26px;border-bottom:2px solid var(--accent);padding-bottom:10px;margin-bottom:6px}
+  h2{font-size:20px;color:var(--accent);margin:34px 0 14px;border-left:4px solid var(--accent);padding-left:10px}
+  h3{font-size:16px;color:var(--violet);margin:20px 0 8px}
+  .meta{color:var(--fg-dim);font-size:13px;margin-bottom:24px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;text-align:center}
+  .card .num{font-size:24px;font-weight:700;color:var(--accent)}
+  .card .lbl{font-size:12px;color:var(--fg-dim);margin-top:4px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+  th{background:var(--panel2);color:var(--accent);text-align:left;padding:8px 10px;border:1px solid var(--border);white-space:nowrap}
+  td{padding:6px 10px;border:1px solid var(--border);vertical-align:top}
+  tr:nth-child(even) td{background:rgba(255,255,255,0.02)}
+  .tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;margin-right:4px}
+  .t-c{background:#1f3a5f;color:var(--accent)}
+  .t-d{background:#3d2f1a;color:var(--warn)}
+  .t-g{background:#1b3a25;color:var(--good)}
+  .t-v{background:#33254d;color:var(--violet)}
+  .t-r{background:#4a2121;color:var(--bad)}
+  .flow{display:flex;flex-direction:column;gap:8px;margin:16px 0}
+  .frow{display:flex;gap:8px;flex-wrap:wrap;align-items:stretch}
+  .fnode{flex:1;min-width:170px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12.5px;position:relative}
+  .fnode b{display:block;font-size:13px;color:var(--accent);margin-bottom:2px}
+  .fnode.compute{border-color:#5d3a8a}
+  .fnode.compute b{color:var(--violet)}
+  .fnode.depth{border-color:#8a6d1a}
+  .fnode.depth b{color:var(--warn)}
+  .fnode.gbuf{border-color:#1f6f3f;background:linear-gradient(180deg,#12261a,#161b22)}
+  .fnode.gbuf b{color:var(--good)}
+  .fnode.post{border-color:#1a4a6e}
+  .fnode.post b{color:#4db8ff}
+  .arrow{color:var(--fg-dim);text-align:center;font-size:16px;margin:-2px 0}
+  .note{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--warn);border-radius:6px;padding:12px 16px;margin:14px 0;font-size:13.5px}
+  .note.blue{border-left-color:var(--accent)}
+  .note.green{border-left-color:var(--good)}
+  .note.red{border-left-color:var(--bad)}
+  code{background:#21262d;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12.5px;color:#ffa657}
+  .evid{color:var(--fg-dim);font-size:12px}
+  .bar{height:8px;background:#21262d;border-radius:4px;overflow:hidden;min-width:120px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--violet))}
+  .foot{margin-top:40px;padding-top:14px;border-top:1px solid var(--border);color:var(--fg-dim);font-size:12px}
+  ul{margin:8px 0 8px 22px}
+  li{margin:4px 0}
+</style>
+</head>
+<body>
+
+<h1>《终末地》大地图场景 — 渲染流程分析报告</h1>
+<div class="meta">
+  截帧文件：<code>D:\Renderdoc 截帧\终末地\大地图.rdc</code> &nbsp;|&nbsp;
+  图形 API：<b>Vulkan</b> &nbsp;|&nbsp; 分析工具：RenderDoc 官方 qrenderdoc + MCP（renderdoc server）&nbsp;|&nbsp; 生成日期：2026-09-28
+</div>
+
+<h2>1. 帧总览</h2>
+<div class="cards">
+  <div class="card"><div class="num">1330</div><div class="lbl">总 Action 数</div></div>
+  <div class="card"><div class="num">1126</div><div class="lbl">Draw Call</div></div>
+  <div class="card"><div class="num">91</div><div class="lbl">Compute Dispatch</div></div>
+  <div class="card"><div class="num">38</div><div class="lbl">Copy 操作</div></div>
+  <div class="card"><div class="num">710</div><div class="lbl">纹理资源</div></div>
+  <div class="card"><div class="num">33</div><div class="lbl">Buffer 资源</div></div>
+  <div class="card"><div class="num">1842×1036</div><div class="lbl">主 GBuffer 分辨率</div></div>
+</div>
+
+<div class="note blue">
+  <b>核心结论（经逐 Pass SPIR-V 取证修正）：</b>
+  <b>帧首 Compute Pass #1（98 action）不是游戏逻辑——它是 RenderDoc 回放在 PC 端注入的 ASTC 纹理解码与资源初始内容还原</b>（见 4.1 节），分析游戏帧耗时时应整体剔除；
+  真正的游戏前置工作是：Colour Pass #1–3 的<b>预计算大气散射 LUT 链</b>（transmittance → 多重散射 → 天空视景）、Compute Pass #2 的<b>植被散布/风场数据生成</b>、Colour Pass #4–7 的程序化贴图链，以及 Depth-only Pass #1–3 的<b>阴影图渲染</b>（聚光 512² D32 + CSM 2048² D16 ×2）——<b>不存在独立的场景深度预 pass</b>；
+  场景几何在单一 <b>5-Subpass 超大 RenderPass</b>（E2621–E4803）内完成深度写入（SP0/SP1，SP1 用 null PS）→ GBuffer 填充（SP2，4 MRT）→ 延迟光照（SP3）→ 特殊材质（SP4）；
+  后段为 Karis Bloom 金字塔 + 畸变合成 + UI。GPU 热点集中在 GBuffer/阴影阶段的中大网格与高实例数植被（overdraw 受限）。
+</div>
+
+<h2>2. 帧结构：25 个顶层 Pass</h2>
+<table>
+<tr><th>#</th><th>Pass 名称</th><th>事件范围</th><th>子项数</th><th>内容特征</th><th>推断用途</th></tr>
+<tr><td>1</td><td>Compute Pass #1</td><td>E76–E452</td><td>98</td><td>60×Dispatch + 28×CopyImage + 10×CopyBufferToImage</td><td><span class="tag t-r">RenderDoc 注入</span> <b>非游戏逻辑</b>：ASTC 纹理软解码 + 资源初始内容还原（见 4.1 节）</td></tr>
+<tr><td>2</td><td>Colour Pass #1–3</td><td>E455–E480</td><td>各3</td><td>每次 1 个 3 顶点全屏 Draw</td><td><span class="tag t-c">大气散射 LUT</span> 透射率 → 多重散射 → 天空视景（已反汇编确认，见 4.6 节）</td></tr>
+<tr><td>3</td><td>Compute Pass #2</td><td>E484–E535</td><td>15</td><td>14×Dispatch + 1×CopyBuffer</td><td><span class="tag t-v">Compute</span> 植被散布/风场体素数据生成 + 计数器清零（见 4.6 节）</td></tr>
+<tr><td>4</td><td>Colour Pass #4–6</td><td>E537–E562</td><td>各3</td><td>Clear + 1 全屏 Draw</td><td><span class="tag t-c">程序化贴图链</span> 光斑合成→锐化→法线生成（疑体积光/探针数据，见 4.6 节）</td></tr>
+<tr><td>5</td><td>Colour Pass #7</td><td>E569–E576</td><td>3</td><td>1 全屏 Draw（PS 126372）</td><td><span class="tag t-c">全屏处理</span> 两通道重打包（R=UV位移场, G=高度），见 4.6 节</td></tr>
+<tr><td>6</td><td>Depth-only Pass #1</td><td>E578–E677</td><td>21</td><td>D=Load；写 126036（512² D32）</td><td><span class="tag t-d">阴影图</span> <b>聚光/点光阴影</b>（SP3 光照采样绑定证实）</td></tr>
+<tr><td>7</td><td>Depth-only Pass #2</td><td>E679–E2083</td><td>310</td><td>D=Clear；~290 Draw；写 126018（2048² D16）</td><td><span class="tag t-d">阴影图</span> <b>CSM 级联 1</b>（近平行光，SP3 绑定 res21 证实）</td></tr>
+<tr><td>8</td><td>Depth-only Pass #3</td><td>E2085–E2610</td><td>115</td><td>D=Load；写 126027（<b>3072×2048</b> D16）</td><td><span class="tag t-d">阴影图</span> <b>CSM 级联 2</b>（远平行光；注：SP3 另绑定 126021 2048² D16，其写入点未在采样事件中定位，疑为更早级联）</td></tr>
+<tr><td>11</td><td>Colour Pass #8</td><td>E2612–E2619</td><td>3</td><td>Clear + 1 全屏 Draw</td><td><span class="tag t-c">大气/雾</span> <b>解析式高度雾/大气散射</b>（已反汇编确认，见 4.5 节）</td></tr>
+<tr><td>12</td><td>Depth-only Pass #4<br><b>= 大 RenderPass 的 Subpass 0</b></td><td>E2621–E3126</td><td>119</td><td>DS=Clear；大量 12–54 索引 × 高实例数；末尾 1536×62 / 1536×56 实例</td><td><span class="tag t-d">Subpass 0</span> 植被/草丛/小物件实例层深度</td></tr>
+<tr><td>13</td><td><b>Colour Pass #9</b>（4 Targets + Depth）<br>= 同一 RenderPass 的 Subpass 1–2</td><td>E3127–E4599</td><td>344</td><td>SP1≈330 Draw（GBuffer，最大 37839 索引）；SP2=8 Draw（含 1536×62 实例）</td><td><span class="tag t-g">Subpass 1–2</span> GBuffer 4 MRT（R11G11B10 等）+ 植被着色</td></tr>
+<tr><td>14</td><td>Colour Pass #10（1-2 Targets + Depth）<br>= 同一 RenderPass 的 Subpass 3–4</td><td>E4600–E4803</td><td>46</td><td>SP3=9×全屏 Draw；SP4≈38 Draw（重复 #9 中的大网格子集：37839/33729/29655…）</td><td><span class="tag t-g">Subpass 3–4</span> 全屏光照（input attachment 消费 GBuffer）+ 大网格二次着色</td></tr>
+<tr><td>15</td><td>Colour Pass #11</td><td>E4805–E4812</td><td>3</td><td>1 全屏 Draw，读 126274(D24S8) 写 126285</td><td><span class="tag t-c">深度拷贝</span> GBuffer 深度 → R32_FLOAT 全分辨率（线性化供后续采样）</td></tr>
+<tr><td>16</td><td>Colour Pass #12</td><td>E4814–E4821</td><td>3</td><td>1 全屏 Draw，读深度写 132437（R32_FLOAT 921×518）</td><td><span class="tag t-c">Hi-Z 第1级</span> 4-tap <b>NMax</b> 池化降采样（PS 132699 实锤）→ 供 SSR 光线步进</td></tr>
+<tr><td>17</td><td>Colour Pass #13（2T+D）</td><td>E4823–E4892</td><td>13</td><td>写 139253(921×518 R11G11B10)+132434；读 RT0/反射向量/Hi-Z</td><td><span class="tag t-c">SSR 半分辨率</span> <b>屏幕空间反射</b>：12 步光线步进循环（PS 132706，含 Hi-Z 命中判定与二分），见 4.7 节</td></tr>
+<tr><td>18</td><td>Colour Pass #14（2T+D）</td><td>E4894–E5250</td><td>75</td><td>写 126288+126262(RT1)，复用 126274 深度</td><td><span class="tag t-c">前向着色</span> <b>植被/透明 uber-shader</b>（PS 160611，1652 指令：cluster 光照+CSM Dref 采样+反射探针+风场 3D 纹理+雾），见 4.7 节</td></tr>
+<tr><td>19</td><td>Colour Pass #15</td><td>E5252–E5259</td><td>3</td><td>1 全屏 Draw，写 126265</td><td><span class="tag t-c">解析+色调映射</span> 桶形畸变 UV + 3×3 邻域钳制（防溢色）+ Reinhard（已反汇编确认）</td></tr>
+<tr><td>20</td><td>Compute Pass #3</td><td>E5263–E5319</td><td>15</td><td>15×Dispatch，921×518 / 461×259 R11G11B10</td><td><span class="tag t-v">Bloom 金字塔</span> Karis 亮部提取 + 降采样混合（已反汇编确认）</td></tr>
+<tr><td>21</td><td>Colour Pass #16</td><td>E5321–E5328</td><td>3</td><td>1 全屏 Draw，写 126336（RGBA8 1842×1036）</td><td><span class="tag t-c">最终合成</span> 锐化+Bloom叠加+vignette+LogC LUT 调色+sRGB 编码+胶片颗粒（PS 126537 实锤，见 4.7 节）</td></tr>
+<tr><td>22</td><td>Colour Pass #17</td><td>E5330–E5610</td><td>89</td><td>全屏 blit + ~86 个 6–120 索引小 Draw</td><td><span class="tag t-c">上屏+UI</span> 126336 → BackBuffer(1722) 纯 blit + UI 四边形（premultiply alpha）</td></tr>
+<tr><td>23</td><td>Copy/Clear Pass #1</td><td>E5613–E5622</td><td>4</td><td>1×CopyImageToBuffer</td><td><span class="tag t-r">回读</span> BackBuffer 回读（截图/缩略图/水印）</td></tr>
+</table>
+<p class="evid">证据：get_frame_summary 顶层标记（E5625–E5649）、get_draw_calls 全树（分三段拉取，覆盖 E4–E5624）、get_pipeline_state(E3204/E5336)、get_draw_call_details(E586/E3204/E5336)。</p>
+
+<h2>3. 渲染管线流程图</h2>
+<div class="flow">
+  <div class="frow">
+    <div class="fnode compute"><b>① Compute Pass #1（RenderDoc 注入）</b>ASTC 软解码 + 资源还原<br>（60× Dispatch + 38× Copy，<b>非游戏逻辑</b>）</div>
+    <div class="fnode"><b>② 大气散射 LUT 链</b>Colour Pass #1–3<br>透射率 → 多重散射 → 天空视景<br>（Bruneton 预计算大气）</div>
+    <div class="fnode compute"><b>③ Compute Pass #2</b>植被散布/风场体素生成<br>3D 噪声采样 + PackHalf 打包<br>+ 计数器清零</div>
+    <div class="fnode"><b>③.5 程序化贴图链</b>Colour Pass #4–7<br>光斑 → 锐化 → 法线图 → 重打包</div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="frow">
+    <div class="fnode depth"><b>④ 阴影图渲染</b>Depth-only #1–3<br>聚光 512² D32（21 Draw）<br>CSM 级联 2048² D16 ×2（~405 Draw）</div>
+    <div class="fnode"><b>⑤ 高度雾</b>Colour Pass #8<br>解析式大气散射（零纹理采样）</div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="frow">
+    <div class="fnode gbuf" style="flex:3"><b>⑦ 单一 5-Subpass 超大 RenderPass（E2621–E4803，RenderDoc 标签拆显为 Depth-only Pass #4 + Colour Pass #9/#10）</b>
+      Subpass 0：119 Draw 植被/实例层深度（DS=Clear，1536idx×62）<br>
+      Subpass 1：~330 Draw → GBuffer 4 MRT（1842×1036，R11G11B10_FLOAT 主目标，Depth=126274）<br>
+      Subpass 2：8 Draw（含 1536×62 实例植被着色）<br>
+      Subpass 3：9× 全屏 Draw（光照/解析，input attachment 消费 GBuffer）<br>
+      Subpass 4：~38 Draw 大网格二次着色（37839/33729/29655 索引，推测水/特殊材质），C=Store DS=Store</div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="frow">
+    <div class="fnode post"><b>⑨ 深度准备（#11/#12）</b>深度拷贝 → R32 全分辨率<br>→ 4-tap NMax 池化半分辨率（Hi-Z 供 SSR）</div>
+    <div class="fnode post"><b>⑩ SSR（#13）</b>12 步光线步进 @921×518<br>读 RT0/反射向量/Hi-Z → 139253</div>
+    <div class="fnode post"><b>⑪ 前向植被/透明（#14）</b>uber-shader：cluster 光照<br>+CSM+反射探针+风场+雾<br>写 126288+126262</div>
+    <div class="fnode post"><b>⑫ 解析+色调映射（#15）</b>畸变 UV + 邻域钳制 + Reinhard → 126265</div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="frow">
+    <div class="fnode post"><b>⑬ Bloom 金字塔（Compute #3）</b>Karis 亮部提取 + 15 级降采样混合<br>1842×1036 → 921×518 → 461×259</div>
+    <div class="fnode post"><b>⑭ 最终合成（#16）</b>锐化 + Bloom 叠加 + vignette<br>+ LogC LUT 调色 + sRGB + 胶片颗粒 → 126336</div>
+    <div class="fnode post"><b>⑮ 上屏+UI（#17）</b>blit → BackBuffer(1722)<br>+ ~86 个 UI 四边形</div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="frow"><div class="fnode"><b>⑫ Copy/Clear Pass</b>vkCmdCopyImageToBuffer(E5620) 回读 → vkQueuePresent(E5624)</div></div>
+</div>
+
+<h2>4. 关键技术特征</h2>
+
+<h3>4.1 帧首 Compute Pass #1 = RenderDoc 注入的 ASTC 解码（非游戏逻辑）</h3>
+<ul>
+  <li><b>决定性证据</b>：Compute Pass #1 首个 dispatch（E76）的着色器（ResourceId::1590）是<b>完整的 ASTC 解码器</b>——函数名与结构一目了然：<code>astcDecodeTexel</code>、<code>decodeEndpoints</code>、<code>decodeWeights</code>、<code>selectPartition</code>、<code>hash52</code>（分区种子哈希）、<code>buildBitmask</code>、<code>decodeTrit/decodeQuint</code>（三/五进制权重解包），生成器标注 <code>Shaderc over Glslang</code>（与游戏侧 spiregg 不同源）。这是 RenderDoc 在不支持 ASTC 的 PC 上回放时注入的<b>纹理解码工作</b>。</li>
+  <li>同 Pass 内 28×CopyImage + 10×CopyBufferToImage 是 RenderDoc 还原截帧时刻资源初始内容的回写。</li>
+  <li><b>分析结论修正</b>：Compute Pass #1 的 98 个 action 应整体从"游戏帧耗时"中剔除；帧首 GPU 开销（E76–E452 各 dispatch 约 0.002–0.033ms）属于回放工具成本，真机上不存在。</li>
+  <li>游戏自身的 GPU-Driven 证据不变：GBuffer 主通道 VS（E3204）从 <b>8.4MB SSBO（Buffer 1193）顶点拉取</b>，配超大打包常量块（1312B×22 矩阵 / 3200B×139 float4）。</li>
+</ul>
+
+<h3>4.2 阴影图渲染：Depth-only Pass #1–3（原"深度预pass"误判修正）</h3>
+<ul>
+  <li><b>修正说明</b>：初版将这三段当作场景深度预pass，经输出目标逐条核实，它们写的是<b>阴影贴图</b>而非场景深度：
+    <ul>
+      <li>DP1（E578–E677，21 Draw）→ <code>126036</code>（<b>512×512 D32</b>）= 聚光/点光阴影，SP3 光照着色器 slot 0 绑定证实；</li>
+      <li>DP2（E679–E2083，~290 Draw）→ <code>126018</code>（<b>2048×2048 D16</b>）= CSM 级联 1（近平行光）；</li>
+      <li>DP3（E2085–E2610，115 Draw）→ <code>126027</code>（<b>3072×2048 D16</b>）= CSM 级联 2（远平行光，画幅更宽对应远距视锥）。</li>
+    </ul>
+    取证：get_draw_call_details @ E586/E676/E691/E2094/E2101 的 depth_output 逐条核实；get_texture_info 确认格式与分辨率；E4604（SP3 光照）的资源绑定（res21=126018、res25=126021、slot0=126036）闭环验证。
+  </li>
+  <li>阴影渲染是该帧 Draw 数最重的部分之一（~426 Draw），且与后续 GBuffer 的几何高度重叠——属阴影投射器的常规代价。</li>
+  <li>DP1 的首个 Draw（E586）为全屏三角形 + <b>DepthReplacing</b> PS（126376）：采样高度纹理重排阴影深度——阴影图初始化/拷贝操作。</li>
+  <li>不存在独立的场景深度预pass：场景深度直接在大 RenderPass 的 SP0（植被层，DS=Clear）与 SP1（主几何，null PS 写深度）中生成。</li>
+</ul>
+
+<h3>4.3 GBuffer：单一 5-Subpass 超大 RenderPass（Tiled-Subpass 架构）</h3>
+<ul>
+  <li><b>识别方法</b>：Event Browser 中存在 4 条 <code>vkCmdNextSubpass() => N</code> 事件（E3127/E4563/E4600/E4637），且整个区间 <b>E2621(BeginRenderPass, DS=Clear) → E4803(EndRenderPass, C=Store DS=Store) 之间没有任何 End/BeginRenderPass</b>——即 "Depth-only Pass #4"、"Colour Pass #9"、"Colour Pass #10" 三个顶层标签（RenderDoc 对子通道的合成标记）实际是<b>同一个物理 RenderPass 的 5 个 Subpass</b>。</li>
+  <li><b>Subpass 0</b>（E2621–E3126）：植被/实例层深度预pass（DS=Clear，119 Draw，1536×62 实例草丛收尾）。深度预pass被纳入同一 RenderPass，TBR 上避免 tile 卸载/重载。</li>
+  <li><b>Subpass 1</b>（E3127–E4562）：GBuffer 主着色，写入 <b>4 个 MRT + Depth</b>（E3204 输出 ResourceId 126758/126262/126279/126282 + Depth 126274），主 GBuffer 格式 <b>R11G11B10_FLOAT（1842×1036）</b>——移动端友好的带宽优化格式。</li>
+  <li><b>Subpass 2</b>（E4563–E4599）：8 Draw，植被二次着色（1536 索引 × 62 实例再次出现）。</li>
+  <li><b>Subpass 3</b>（E4600–E4636）：9 个全屏 Draw，以 <b>input attachment</b> 方式在 RenderPass 内直接消费 GBuffer（光照/解析），避免 RenderPass 间切换与 tile 内存卸载，是典型的移动端 TBR/TBDR 优化手法。</li>
+  <li><b>Subpass 4</b>（E4637–E4803）：~38 Draw，将 Subpass 1 中的最大网格子集（37839/33729/29655/22137/17331 索引等）重绘一遍，推测为水体/特殊材质的二次着色或平面反射采样层。</li>
+</ul>
+
+<h3>4.4 后处理链：Karis 亮部提取 Bloom（已通过反汇编确认）</h3>
+<ul>
+  <li><b>Bright-Pass（E5263，CS=ResourceId::126477，SPIR-V 已确认）</b>：着色器对每个像素取 <b>4 个对角采样</b>（偏移 (0.9,−0.4)/(−0.9,0.4)/(0.4,0.9)/(−0.4,−0.9)×texel scale），每个采样先做 <b>NaN/Inf 防护</b>（与 0x7F7FFFFF=FLT_MAX 比较），然后执行经典 <b>Karis 软阈值亮部提取</b>：<code>maxc = max(r,g,b)</code> → <code>clamp(maxc − threshold, 0, knee)</code> → <code>softKnee × x²</code>（平方软拐点）→ 归一化，并用亮度权重 <code>1/(luma+1)</code>（luma 系数 0.2126/0.7153/0.0722，即 Karis average 抗闪烁加权）做 4 tap 加权平均后写入。这是 ACES/CoD 风格的标准 Bloom 提取方案。</li>
+  <li><b>金字塔混合（E5319，CS=ResourceId::126533，已确认）</b>：着色器对低一级金字塔纹理做 ImageFetch、对高一级做 ImageSample，然后 <code>FMix(fetch, sample, intensity)</code> 写回——典型的 <b>Bloom 降/升采样混合</b>节点。整条链操作 1842×1036 → 921×518 → 461×259 的 R11G11B10 目标（ResourceId 126291/126294/126333），共 15 级 Dispatch。</li>
+  <li><b>合成与色调映射（E5258，PS=ResourceId::126467，已确认）</b>：最终合成并非简单叠加——着色器先从一张辅助纹理 ImageFetch UV 并计算 <code>sign(uv−0.5)×(|uv|×2−1)²</code> 形的 <b>桶形畸变 UV</b>（lens distortion），再采样场景+Bloom 合成纹理，用 <b>3×3 邻域 min/max 钳制</b>（ImageGather×4 + 邻域比较，防 Bloom/TAA 上采样溢色的 neighborhood clamp），随后执行色调映射（<code>c/(1+c)</code> Reinhard 型曲线 + 通道重排编码）输出。</li>
+  <li>最终 blit（E5336，PS=ResourceId::28429）只是带 LOD 的简单纹理采样（把 1842×1036 RGBA8 场景色 126336 拷到 BackBuffer 1722），Bloom 合成发生在其上游的 E5258。1842×1036 ≈ 16:9，非标准分辨率，疑似动态分辨率缩放后的渲染目标。</li>
+</ul>
+
+<h3>4.5 Colour Pass #8：解析式高度雾/大气散射（修正原"SSAO"误判，已反汇编确认）</h3>
+<ul>
+  <li><b>修正说明</b>：本报告初版将 Pass #8 标注为"SSAO/环境光吸收"，系仅凭"Clear+单全屏 Draw"形状的误判。E2618 像素着色器（PS=ResourceId::126392）反汇编确认其真实用途为<b>解析式高度雾</b>。</li>
+  <li><b>证据一（零纹理采样）</b>：SSAO 至少需采样深度图，但该 PS 的资源绑定为空（<code>resources: []</code>）——不读任何 GBuffer，纯数学计算。</li>
+  <li><b>证据二（射线解析积分）</b>：着色器从相机位置（uniforms7._child11.xyz）+ UV 构造视线射线，与雾高度平面求交（<code>t=(h−camY)/dirY</code> 型参数化）；对指数高度衰减密度做解析积分 <code>(1−exp(−x))/x</code>，并带数值稳定泰勒回退（<code>0.6931=ln2</code>、<code>0.2402=(ln2)²/2</code>）；Beer-Lambert 透射 <code>exp(−scatter×dist×density)</code>；双层雾（两组 exp2 衰减相加）。</li>
+  <li><b>证据三（输出语义）</b>：输出 <code>RGB = 1−exp(−β·d)</code>（内散射颜色）、<code>A = 1−fogFactor</code>（1−透射率），即标准的高度雾 inscatter/transmittance 对。另有 <code>uint(FragCoord.x)==0</code> 的逐列分支输出 255 量化散射色（疑似调试/打包混合用途）。</li>
+  <li><b>架构含义</b>：因不依赖 GBuffer，雾在 E2612（大 RenderPass 之前）预计算，光照阶段按需采样。Frostbite 风格的物理高度雾/远景大气。帧内未发现独立的 SSAO/GTAO pass——AO 可能折算进 SP3 延迟光照或环境 SH 中。</li>
+</ul>
+
+<h3>4.6 GBuffer 前置 Pass 逐段取证（本轮重分析）</h3>
+<ul>
+  <li><b>Colour Pass #1（E461，PS 28422）→ 透射率 LUT</b>：无纹理输入，纯数学：对每条视线做解析积分（双 exp 衰减层 + <code>(1−e^(−x))/x</code> 稳定形式），输出 <code>exp(−Σ密度)</code> 到 3386——Bruneton 式<b>预计算大气散射的透射率 LUT</b>。</li>
+  <li><b>Colour Pass #2（E470，PS 28424）→ 多重散射 LUT</b>：采样 #1 的透射率 LUT，双 while 步进循环（到地表+到大气顶两段路径）× 0.0796（≈1/4π，各向同性相函数归一化）累加内散射，末尾做了二次多项式拟合封装（<code>x², x³, x⁴</code> 项）输出到 3389——多重散射能量守恒 LUT。</li>
+  <li><b>Colour Pass #3（E479，PS 28426）→ 天空视景 LUT</b>：采样前两张 LUT，沿视线步进并累计 Rayleigh（相位函数 <code>3(1+cos²θ)/(16π)</code> 的 0.0597 常数）+ Mie（HG 相位 <code>(1−g²)/(4π(1+g²−2g·cosθ)^1.5)</code>，12.5625=4π 印证），乘太阳色输出到 3383。</li>
+  <li><b>Compute Pass #2（E484–E535）</b>：首个 dispatch（E484，CS 148398）是<b>SSBO 计数器清零</b>（写常量到槽位）；主体（如 E530，CS 4339）是<b>植被/风场体素生成</b>：从 SSBO 读散布点列表，按两级盒形范围（464m/208m 外层 + 29m/13m 内层 + 116m/52m 第三层）做密度衰减，采样 6 张 3D 噪声纹理（fract 平铺），并按 <code>PackHalf2x16</code> 打包写入实例数据 SSBO（126755）。其中的 <code>0.0313≈1/32</code>、<code>256</code> 灯数组遍历是 cluster 光照关联。这是后续 1536×62 草丛实例化的数据来源。</li>
+  <li><b>Colour Pass #4（E543，PS 160586）→ 光斑合成</b>：8 个（xy=中心, z=缩放, w=强度）径向衰减 blob 叠加 + 噪声纹理采样，输出到 160577。疑为体积光锥/探针分布场。</li>
+  <li><b>Colour Pass #5（E552，PS 160589）→ 锐化</b>：对 #4 输出做 4 邻域差分锐化（<code>c + k×(c−neighbors/4)</code> 型，含 0.4 半径圆形 vignette 掩膜），是 LUT 数据的对比度增强。</li>
+  <li><b>Colour Pass #6（E561，PS 160604）→ 法线生成</b>：对 #5 结果做中心差分（±0.002 偏移两采样）求梯度，缩放后构造 <code>(dx, dy, 1)</code> 归一化，打包 <code>N×0.5+0.5</code> 到 RGB、高度到 A——高度场转法线图的标准操作。</li>
+  <li><b>Colour Pass #7（E575，PS 126372）</b>：小工具 Pass，两纹理重采样重打包（R 取第二张 .y、G 取第一张 .x，带 UV 边界钳制）——数据格式转换。</li>
+  <li><b>Colour Pass #8（E2618）</b>：解析式高度雾（见 4.5 节），与前述 LUT 共同构成完整大气渲染栈：<b>预计算散射 LUT（#1–3）+ 解析高度雾（#8）</b>。</li>
+  <li><b>Depth-only Pass #1–3</b>：阴影图渲染（见 4.2 节），聚光 512² D32 + CSM 级联×2。</li>
+</ul>
+<div class="note blue">
+  <b>整体认知修正</b>：GBuffer 之前的 12 个顶层 Pass 中，<b>只有 Compute Pass #1 是 RenderDoc 注入（应从性能分析剔除）</b>；其余 11 个均为游戏逻辑，分工为：大气 LUT 链（#1–3 色彩）→ 植被/风场数据（Compute #2）→ 程序化贴图（#4–7）→ 阴影图（Depth #1–3）→ 高度雾（#8）。<b>不存在 Hi-Z、SSAO、场景深度预pass</b>——初版基于 Pass 形状推断的结论全部作废，以本节反汇编证据为准。
+</div>
+
+<h3>4.7 GBuffer 后段 Pass 逐段取证（本轮重分析）</h3>
+<ul>
+  <li><b>Colour Pass #11（E4811）→ 深度拷贝</b>：PS 126458 是带 LOD 参数的纯采样 blit，读 GBuffer 深度 126274（D24S8）写 <b>126285（R32_FLOAT，全分辨率）</b>——把深度转成可自由采样的 float 纹理，供 SSR 等后续 pass 使用。</li>
+  <li><b>Colour Pass #12（E4820）→ Hi-Z 第一级</b>：PS 132699 对深度做 <b>4-tap NMax 池化</b>（中心 + 右 + 下 + 右下取 max），输出 <b>132437（R32_FLOAT，921×518 半分辨率）</b>——max 语义确认这是 Hi-Z 保守深度金字塔的首级（而非均值降采样），供光线步进做遮挡粗判。</li>
+  <li><b>Colour Pass #13（E4831 等）→ SSR 屏幕空间反射</b>：PS 132706 含 <b>12 步光线步进循环</b>：每步 4 个深度采样点做包围盒早退（<code>Any(&lt;eps)</code> 命中判定 + 线性插值求精确交点），配 2D 抖动哈希（<code>fract(dot(p,{0.0671,0.0058}))×52.9829</code>）抗条带；读 RT0（HDR 场景色）、RT1（反射向量编码）、132437（Hi-Z）；输出到 <b>139253（921×518 R11G11B10 半分辨率）</b> + 132434。步进式 march + 邻域命中判定是标准 SSR 实现。</li>
+  <li><b>Colour Pass #14（E4906 等）→ 前向植被/透明 uber-shader</b>：PS 160611（1652 个 SPIR-V id，全帧最大着色器之一）功能清单：cluster 光照（32 灯盒交集 + 位域遍历）、<b>CSM 阴影比较采样（ImageSampleDrefExplicitLod）</b>、反射探针（2DArray + LOD 偏置）、植被风场（6 张 3D 噪声纹理 fract 平铺 + 两级盒形衰减）、imposter 2DArray、高度雾/大气散射（与 Colour Pass #8 同源的 0.0597 Rayleigh 常数）、菲涅尔、Alpha 裁剪。写 126288 + 126262（反射向量 RT）。318/6 索引小 Draw 为粒子/特效。</li>
+  <li><b>Colour Pass #15（E5258）→ 解析+色调映射</b>：桶形畸变 UV（<code>sign(uv−0.5)×(|uv|×2−1)²</code>）、3×3 邻域 min/max 钳制、Reinhard 型 <code>c/(1+c)</code>——已在前轮确认（4.4 节）。输出 126265。</li>
+  <li><b>Compute Pass #3</b>：Karis Bloom 金字塔（4.4 节已确认）。</li>
+  <li><b>Colour Pass #16（E5327）→ 最终合成</b>：PS 126537 是完整的后处理合成器，逐功能实锤：
+    <ul>
+      <li><b>锐化</b>：中心 − 4 邻域均值，增益限幅 ±0.1（防过冲）；</li>
+      <li><b>Bloom 叠加</b>：读 Bloom 金字塔末端，Karis 软阈值曲线混合；</li>
+      <li><b>Vignette</b>：径向 <code>1−|uv−c|²</code> 幂次衰减（pow）；</li>
+      <li><b>LUT 调色</b>：<code>Log2×0.3010</code>（log10 化）→ 2D 图集式 LUT 双切片采样 + frac 插值——LogC 编码的 3D LUT 打包成 2D tile 的经典实现；</li>
+      <li><b>sRGB 编码</b>：分段函数常数 <code>12.9219 / 1.0547 / 0.0550 / 0.4167(=1/2.4) / 0.0031</code> 与 sRGB EOTF 逐位吻合；</li>
+      <li><b>胶片颗粒</b>：位置哈希抖动（<code>dot(uv,{171,231})×{0.0097,0.0141,0.0103}</code> → fract → ±0.0039 幅值），de-banding 抖动。</li>
+    </ul>
+    输出 <b>126336（RGBA8 1842×1036）</b>——最终 LDR 画面。
+  </li>
+  <li><b>Colour Pass #17（E5336 + E5342 等）→ 上屏 + UI</b>：E5336 纯 blit（28429）把 126336 拷入 BackBuffer 1722；后续 ~86 个小 Draw 是 UI（E5342，PS 28431：顶点色 ×255 量化还原、纹理采样、premultiply alpha、FMix 淡入淡出——标准 UGUI 式着色器）。</li>
+  <li><b>Copy/Clear Pass #1（E5620）</b>：<code>vkCmdCopyImageToBuffer</code> 回读 BackBuffer——截图/水印/缩略图类功能，会阻塞帧间并行（见建议 5）。</li>
+</ul>
+<div class="note violet">
+  <b>后处理链全景（修正后）</b>：深度拷贝(#11) → Hi-Z max 池化(#12) → SSR 半分辨率(#13) → 前向植被/透明(#14) → 畸变+邻域钳制+Reinhard(#15) → Karis Bloom 金字塔(Compute #3) → 锐化+Bloom+vignette+LUT 调色+sRGB+颗粒(#16) → blit 上屏(#17) + UI。与初版"透明层/色调映射前处理"的模糊标注相比，每一环均有反汇编或绑定级证据。
+</div>
+
+<h3>4.8 Bloom 实现的特殊优化（对比 Unity 内置实现）</h3>
+<div class="note green">
+  <b>结论：有，且是工程上相当激进的一组优化。</b>该引擎的 Bloom 金字塔没有走光栅化全屏 pass，而是<b>纯 Compute + 共享内存（Workgroup Shared Memory）融合管线</b>，与 Unity 内置（URP Bloom）的光栅化 Blit 链形成鲜明对照。证据：CS 126528（E5267/E5291 等中间级）的反汇编。
+</div>
+<h3>4.8.1 该引擎 Bloom 的技术清单（全部反汇编实锤）</h3>
+<ul>
+  <li><b>① 单 Dispatch 融合 H+V 双向高斯</b>：CS 126528 在一次 dispatch 内完成水平+垂直两次模糊——每个 workgroup（8×8 线程）先把 16×16 纹素块加载进 <b>3 个共享内存数组（uint[128]×3，RGB 各一）</b>，<code>ControlBarrier</code> 后做水平高斯，再 <code>ControlBarrier</code> 做垂直高斯，最后 <code>ImageWrite</code> 写出。Unity URP 的等价操作需要<b>两个独立 Blit pass</b>（水平 RT → 垂直 RT），本实现省掉一次中间纹理的写+读往返。</li>
+  <li><b>② 共享内存半精度打包</b>：加载阶段用 <code>PackHalf2x16</code> 把两个 half 压进一个 uint（3 通道 × 128 uint = 1.5KB workgroup 内存），共享内存占用减半，直接提升 occupancy。</li>
+  <li><b>③ 9-tap 二项式高斯核</b>：权重 <code>0.2734 / 0.2188 / 0.1094 / 0.0313 / 0.0039</code> 逐位对应二项式系数 <b>[70, 56, 28, 8, 1]/256</b>（即 [C(8,4),C(8,3)...]/2⁸）——精确的对称 9-tap Gaussian，质量高于 URP 默认的双线性降采样。</li>
+  <li><b>④ 每线程 2×2 纹素加载</b>：加载阶段每线程采样 4 个纹素（(0.5,0.5)/(1.5,0.5)/(0.5,1.5)/(1.5,1.5)），8×8 线程组覆盖 16×16 输入块，为模糊提供 4 纹素 halo。</li>
+  <li><b>⑤ Karis 亮部提取</b>（CS 126477，首轮已确认）：4 对角 tap + NaN/Inf 防护 + <code>1/(luma+1)</code> 抗闪烁加权——Unity URP 的 Prefilter 只是简单 threshold 减法，无 Karis 加权。</li>
+  <li><b>⑥ FMix 金字塔混合</b>（CS 126533）：升采样时 <code>fetch(低级) + sample(高级) → FMix(intensity)</code>，单 dispatch 完成合并。</li>
+</ul>
+<h3>4.8.2 对比 Unity 内置 Bloom（URP）</h3>
+<table>
+<tr><th>维度</th><th>本引擎（终末地）</th><th>Unity URP Bloom</th><th>差距</th></tr>
+<tr><td>执行方式</td><td><b>纯 Compute（ImageWrite）</b></td><td>光栅化 Blit（全屏三角形）</td><td>省去光栅化/三角形开销，无 RT 绑定切换</td></tr>
+<tr><td>每级模糊 pass 数</td><td><b>1 个 dispatch</b>（H+V 融合于共享内存）</td><td>2 个 Blit（H→中间RT→V）</td><td><b>每级省一次纹理往返</b>，移动端带宽敏感场景收益显著</td></tr>
+<tr><td>滤波核</td><td>9-tap 二项式 Gaussian（/256 精确权重）</td><td>双线性降采样（BlurH/BlurV）或 Dual Kawase</td><td>核更大更平滑，质量更高</td></tr>
+<tr><td>亮部提取</td><td>Karis 软阈值 + <code>1/(luma+1)</code> 抗闪烁 + NaN 防护</td><td>简单 threshold（soft knee），无抗闪烁加权</td><td>抗闪烁更好（Karis 为 ACES/CoD 方案）</td></tr>
+<tr><td>共享内存</td><td>PackHalf2x16 压缩（1.5KB/wg）</td><td>不适用（无 compute）</td><td>—</td></tr>
+<tr><td>金字塔层数</td><td>2 级（921×518 → 461×259，共 15 dispatch）</td><td>可配 5–8 级 mip</td><td>层数少 = bloom 半径小但省带宽，移动端取舍合理</td></tr>
+</table>
+<div class="note blue">
+  <b>评价</b>：这是一套<b>面向移动端带宽的 Compute Bloom</b>——用共享内存把每级的 H+V 模糊压进一次 dispatch、用半精度打包压缩共享内存、用精确二项式核保证质量，同时亮部提取用了比 Unity 更讲究的 Karis 加权。15 个 dispatch 完成整条金字塔（1842×1036→921×518→461×259 两级），是"少层数+高质量核+零中间纹理"的移动端最优解之一。唯一取舍是金字塔只有 2 级，bloom 扩散半径比 Unity 默认（5+ 级）小。
+</div>
+
+<h2>5. GPU 耗时热点（Top Draw Calls）</h2>
+<div class="note">
+  计时说明：RenderDoc GPU 计时器分辨率约 1μs，帧内大量 Draw 计时报 0.0；下表为非零样本中的 Top 项。可见单 Draw 最贵仅 ~0.084ms，帧瓶颈分散在 GBuffer/植被 overdraw 而非单一大网格。
+</div>
+<table>
+<tr><th>排名</th><th>事件</th><th>索引数</th><th>实例数</th><th>GPU 耗时</th><th>所在阶段</th><th>相对占比条</th></tr>
+<tr><td>1</td><td>E3714</td><td>1860</td><td>17</td><td><b>0.0840 ms</b></td><td>GBuffer Subpass 1（中网格高实例）</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+<tr><td>2</td><td>E3195</td><td>16953</td><td>1</td><td><b>0.0809 ms</b></td><td>GBuffer Subpass 1（大网格）</td><td><div class="bar"><i style="width:96%"></i></div></td></tr>
+<tr><td>3</td><td>E3266</td><td>29655</td><td>1</td><td><b>0.0625 ms</b></td><td>GBuffer Subpass 1（大网格）</td><td><div class="bar"><i style="width:74%"></i></div></td></tr>
+<tr><td>4</td><td>E4256</td><td>2424</td><td>7</td><td><b>0.0614 ms</b></td><td>Subpass 4（大网格二次着色）</td><td><div class="bar"><i style="width:73%"></i></div></td></tr>
+<tr><td>5</td><td>E3153</td><td>3291</td><td>1</td><td><b>0.0594 ms</b></td><td>GBuffer Subpass 1</td><td><div class="bar"><i style="width:71%"></i></div></td></tr>
+<tr><td>6</td><td>E880</td><td>8436</td><td>1</td><td><b>0.0481 ms</b></td><td>Depth-only Pass #2（CSM 级联 1 阴影渲染）</td><td><div class="bar"><i style="width:57%"></i></div></td></tr>
+<tr><td>7</td><td>E3199</td><td>6876</td><td>1</td><td><b>0.0481 ms</b></td><td>GBuffer Subpass 1</td><td><div class="bar"><i style="width:57%"></i></div></td></tr>
+<tr><td>8</td><td>E4096</td><td>48</td><td>39</td><td><b>0.0410 ms</b></td><td>GBuffer Subpass 1（小网格高实例 → overdraw 型）</td><td><div class="bar"><i style="width:49%"></i></div></td></tr>
+<tr><td>9</td><td>E733</td><td>702</td><td>2</td><td><b>0.0379 ms</b></td><td>Depth-only Pass #2</td><td><div class="bar"><i style="width:45%"></i></div></td></tr>
+<tr><td>10</td><td>E828</td><td>1728</td><td>1</td><td><b>0.0348 ms</b></td><td>Depth-only Pass #2</td><td><div class="bar"><i style="width:41%"></i></div></td></tr>
+</table>
+<p class="evid">对照样本：最大索引数网格 E3204（37839 索引）仅 0.0236ms，E4714（Subpass 4 同网格）亦为同一量级 —— 说明瓶颈在像素/overdraw 而非顶点吞吐。</p>
+
+<h2>6. 优化建议</h2>
+<div class="note green">
+  <b>建议 1（overdraw）：植被与小实例物件是首要优化点。</b>E3714（1860×17）、E4096（48×39）等高实例数 Draw 位列耗时榜首，且植被在 Depth Pass #4、GBuffer Subpass 2 中被多次绘制。可考虑：植被 LOD/密度随距离衰减、Alpha-test 改 Alpha-to-coverage 减少 PS 深/浅分支、以及评估 E3120/E4573 这类 1536×62 实例的屏幕覆盖率。
+</div>
+<div class="note green">
+  <b>建议 2（阴影渲染开销，原"深度冗余"结论作废重评）：</b>重取证表明 Depth-only Pass #1–3 是<b>阴影图渲染</b>（聚光 512² + CSM 2048²/3072×2048，~426 Draw），并非被丢弃的场景深度——不存在浪费。真正的优化点：①CSM 两 cascade 分别清屏且逐物体重绘，可评估 GPU 剔除后的 cascade 共享绘制列表或合并 pass；②聚光阴影仅 21 Draw 但独占一个 RP，若灯数少可合入 CSM 末级 atlas。另：Compute Pass #1（98 action）为 RenderDoc 回放注入，<b>真机帧中不存在，勿计入性能结论</b>。
+</div>
+<div class="note green">
+  <b>建议 3（Subpass 4 重复着色）：37839/33729/29655 级别的大网格在 Subpass 4 被整体重绘（E4256 耗时 0.061ms）。</b>若用于水/反射，建议以屏幕空间 mask（Stencil 或深度范围）限制重绘范围，或降半分辨率渲染后上采样。
+</div>
+<div class="note green">
+  <b>建议 4（Draw 数量）：整帧 1126 Draw 中约 560 个集中在 4 个深度预pass。</b>顶点拉取架构下可进一步把多段深度预pass合并为单次间接绘制（Multi-Draw Indirect），并复用帧首剔除结果；Depth Pass #2 的 ~290 个 Draw 与 GBuffer Subpass 1 的 ~330 个 Draw 几何高度重叠，确认 prepass 的 Early-Z 收益是否大于其成本。
+</div>
+<div class="note green">
+  <b>建议 5（回读阻塞）：帧尾 vkCmdCopyImageToBuffer(E5620) 触发 BackBuffer 回读，会打断与下一帧的并行。</b>若非必须（截图/水印），建议移除或改为异步、隔帧执行。
+</div>
+
+<h2>7. 数据来源与取证</h2>
+<ul>
+  <li>截帧状态：get_capture_status → loaded=true, Vulkan, <code>D:\Renderdoc 截帧\终末地\大地图.rdc</code></li>
+  <li>帧统计与 Pass 列表：get_frame_summary（1330 actions / 1126 draws / 91 dispatches / 38 copies / 710 textures / 33 buffers，25 个顶层标记 E5625–E5649）</li>
+  <li>事件树：get_draw_calls 全量三段拉取（E4–E2811、E2811–E5443、E5443–E5624）</li>
+  <li>GPU 计时：get_action_timings（全部 action；计数器 available=true，单位 Seconds；大量 0.0 条目源于计时器分辨率）</li>
+  <li>管线状态：get_pipeline_state @ E3204（GBuffer VS 顶点拉取/8.4MB SSBO/常量块明细）、@ E5336（最终合成 PS 绑定与 Bloom 金字塔纹理）</li>
+  <li><b>着色器反汇编（get_shader_info）</b>：@ E76/E269 compute（ResourceId::1590，ASTC 解码器，RenderDoc 注入实证）；@ E461/E470/E479 pixel（大气散射 LUT 链 28422/28424/28426）；@ E484/E530 compute（计数器清零 148398 / 植被风场生成 4339）；@ E543/E552/E561/E575 pixel（程序化贴图链 160586/160589/160604/126372）；@ E2618 pixel（高度雾 126392）；@ E5263/E5319 compute（Karis Bloom 126477/126533）；@ E5258 pixel（畸变+钳制+Reinhard 126467）；@ E4811/E4820 pixel（深度拷贝 126458 / Hi-Z max 池化 132699）；@ E4831 pixel（SSR 光线步进 132706）；@ E4906 pixel（前向植被 uber-shader 160611）；@ E5327 pixel（最终合成 126537）；@ E5342 pixel（UI 28431）；@ E5336 pixel（blit 28429）</li>
+  <li>纹理元数据：get_texture_info @ 126018（CSM 2048² D16）/ 126027（3072×2048 D16）/ 132437（R32 921×518）/ 126285（R32 1842×1036）/ 139253（R11G11B10 921×518）</li>
+  <li>Draw 详情：get_draw_call_details @ E586/E676/E691/E2094/E2101（阴影图输出目标）/ E3204/E4567/E4573（GBuffer MRT）/ E4604/E4643（光照/SP4 收窄）/ E4811/E4820/E4831/E4906/E5258/E5327/E5336（后处理链输出）</li>
+</ul>
+<p class="evid">注：已反汇编实锤的结论——RenderDoc ASTC 注入（4.1）、阴影图身份（4.2）、Bloom（4.4）、高度雾（4.5）、大气散射 LUT 链/植被生成/程序化贴图链（4.6）、深度拷贝/Hi-Z/SSR/前向着色/最终合成/UI（4.7）；仍属推断的仅有：Colour Pass #4–7 的业务语义（光斑场用途）、126021 阴影图的写入位置、126288 的具体用途。其余早期基于 Pass 形状的推断已全部作废并就地修正。</p>
+
+<div class="foot">
+  <p>RenderDoc 截帧渲染流程分析 · 2026-09-28 · 工具链：qrenderdoc(官方) + renderdoc MCP · 本报告为自包含 HTML（内联 CSS，无外部依赖）</p>
+</div>
+
+</body>
+</html>

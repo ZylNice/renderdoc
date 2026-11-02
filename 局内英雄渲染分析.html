@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>局内英雄渲染分析（EID 1497）</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#182035; --panel2:#1e2a45; --line:#2c3a5e;
+    --text:#dbe4f5; --dim:#8fa1c4; --accent:#4da3ff; --green:#3ddc97;
+    --yellow:#ffd166; --red:#ff6b6b; --mono:Consolas,"Courier New",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:"Microsoft YaHei","PingFang SC",sans-serif;line-height:1.75;padding:32px}
+  .wrap{max-width:1100px;margin:0 auto}
+  h1{font-size:26px;border-left:5px solid var(--accent);padding-left:14px;margin-bottom:4px}
+  .sub{color:var(--dim);font-size:13px;margin-bottom:28px}
+  h2{font-size:19px;color:var(--accent);margin:36px 0 12px;border-bottom:1px solid var(--line);padding-bottom:8px}
+  h3{font-size:15px;color:var(--yellow);margin:22px 0 8px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 22px;margin:14px 0}
+  .conclusion{background:linear-gradient(135deg,#1c2b4d,#16233c);border:1px solid #35507e;
+              border-radius:10px;padding:20px 24px;margin:18px 0;font-size:15px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:#bcd0f2}
+  td.k{color:var(--dim);white-space:nowrap}
+  code,.mono{font-family:var(--mono);background:#0b101c;border:1px solid var(--line);
+             border-radius:4px;padding:1px 6px;font-size:12.5px;color:#9fd0ff}
+  pre{background:#0b101c;border:1px solid var(--line);border-radius:8px;padding:14px 16px;
+      overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6;color:#b8c8e8}
+  .tag{display:inline-block;border-radius:4px;padding:1px 8px;font-size:12px;font-weight:600;margin-right:4px}
+  .tag.g{background:rgba(61,220,151,.15);color:var(--green);border:1px solid rgba(61,220,151,.4)}
+  .tag.y{background:rgba(255,209,102,.12);color:var(--yellow);border:1px solid rgba(255,209,102,.4)}
+  .tag.r{background:rgba(255,107,107,.12);color:var(--red);border:1px solid rgba(255,107,107,.4)}
+  .good{color:var(--green)} .warn{color:var(--yellow)} .bad{color:var(--red)}
+  ul{margin:8px 0;padding-left:22px} li{margin:4px 0}
+  .note{border-left:4px solid var(--yellow);background:rgba(255,209,102,.06);
+        padding:10px 16px;border-radius:0 8px 8px 0;margin:12px 0;font-size:13.5px}
+  .step{display:flex;gap:14px;margin:10px 0;align-items:flex-start}
+  .step .n{flex:0 0 30px;height:30px;border-radius:50%;background:var(--panel2);border:1px solid var(--accent);
+           color:var(--accent);font-weight:700;display:flex;align-items:center;justify-content:center}
+  .step .c{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 14px;font-size:13.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>局内英雄渲染分析（EID 1497）</h1>
+<div class="sub">截帧：局内-无泛光.rdc（OpenGL） · 王者万象棋 · 基于 RenderDoc 逐事件分析 · 2026-09-21</div>
+
+<div class="conclusion">
+<b>一句话结论：</b>英雄是<b>单 draw 前向渲染（Forward，无延迟、无 HDR 缓冲）</b>：一个约 6900 三角面的合并网格
+（20706 索引，<b>顶点无骨骼蒙皮</b>，姿态预烘焙/刚性变换），一次像素着色完成
+「sRGB 解码 → PBR（DFG split-sum + 32² 环境图 IBL）→ CSM 方向阴影 + 太阳遮挡 → FakeGI → 高度染色 → 菲涅尔 →
+雾 → 曝光 → <b>材质内 filmic tonemap</b>」全部流程，直接写进 2132×1198 的 RGBA8(LDR) 主渲染目标。
+阴影则是独立体系：本 draw 不给地面投影，英雄剪影由前置的 blob 遮罩 pass 单独生成。
+</div>
+
+<h2>一、基本信息</h2>
+<table>
+  <tr><td class="k">调用</td><td><code>glDrawElements()</code>，20706 索引 / 1 实例 ≈ <b>6902 三角面</b>（baseVertex 0）</td></tr>
+  <tr><td class="k">所在 pass</td><td><code>Colour Pass #3 (1 Targets + Depth)</code> = 主场景 pass（EID 697 起，clear 天空蓝 0.498/0.518/0.565）</td></tr>
+  <tr><td class="k">颜色输出</td><td><code>ResourceId::80804</code> — <b>2132×1198 RGBA8_UNORM（LDR，非浮点）</b></td></tr>
+  <tr><td class="k">深度输出</td><td><code>ResourceId::80805</code>（主场景深度）</td></tr>
+  <tr><td class="k">顶点 shader</td><td><code>ResourceId::73846</code> · 像素 shader <code>ResourceId::73847</code></td></tr>
+  <tr><td class="k">前后 draw</td><td>1474(3294) → <b>1497(20706)</b> → 1529(8370) → 1559(24594)：同一材质族连续绘制多个角色/部件网格</td></tr>
+</table>
+
+<h2>二、英雄在整帧中的完整路径</h2>
+<div class="step"><div class="n">1</div><div class="c"><b>Depth-only Pass（帧首）</b>：只有场景网格进 CSM 深度图，<b>英雄不投 CSM 阴影</b>。</div></div>
+<div class="step"><div class="n">2</div><div class="c"><b>blob 遮罩 pass</b>：英雄网格（含 20706 本尊）以恒定强度渲进 512² R8 遮罩 → 全屏 4-tap 模糊。</div></div>
+<div class="step"><div class="n">3</div><div class="c"><b>主 pass — EID 1497</b>：本 draw。英雄主体一次像素着色直出 LDR 颜色。</div></div>
+<div class="step"><div class="n">4</div><div class="c"><b>投影贴片</b>：HeroShadowProjector 把模糊后的遮罩贴回地面（乘法混合），英雄脚下出现软影。</div></div>
+<div class="step"><div class="n">5</div><div class="c"><b>收尾</b>：UI 合成 blit + 带 brightness/gamma 的 present blit，无全屏后处理。</div></div>
+
+<h2>三、顶点阶段：极简，无蒙皮</h2>
+<div class="card">
+输入属性：<code>POSITION</code> / <code>NORMAL</code> / <code>TANGENT</code>(w=手性) / <code>TEXCOORD0</code>(主UV) / <code>TEXCOORD1.xy</code>(第二UV)。
+顶点着色器只做：
+<ul>
+  <li><code>worldPos = ObjectToWorld × POSITION</code>，<code>gl_Position = VP × worldPos</code>——<b>没有骨骼权重/索引、没有蒙皮矩阵</b>，英雄姿态是预烘焙的（变换仅刚性 ObjectToWorld）；</li>
+  <li>法线经 <code>WorldToObject</code> 转置（等价逆转置）回世界空间；切线经 <code>ObjectToWorld</code>；</li>
+  <li>输出屏幕坐标 <code>TEXCOORD6 = (clip.xy/w + 1)/2</code>，供像素阶段做抖动透明（stipple）采样；</li>
+  <li>雾参数两套：径向距离雾（<code>_ug_FogParam</code>，x/z 起点斜率）+ 绕 <code>_ug_YAWorldPosition</code> 的域雾（<code>_ug_YAFogDomainRangeSquare</code>，范围外淡出），结果存进 <code>POSITIONWS0.w</code>；</li>
+  <li><code>_ug_EnableFixedCamera</code>：固定相机模式下用 <code>_ug_FixedCameraPosition</code> 替换真实视点（观战/回放用）。</li>
+</ul>
+</div>
+
+<h2>四、像素阶段：一条龙 PBR 管线（逐步还原）</h2>
+<div class="step"><div class="n">1</div><div class="c"><b>sRGB→线性快速解码</b>：对 Albedo/Emissive 采样值做 <code>c*(0.3053c + 0.6822) + 0.0125</code>（多项式近似，避免 sRGB 纹理格式，省带宽格式切换）。</div></div>
+<div class="step"><div class="n">2</div><div class="c"><b>材质参数</b>：材质图取 roughness/metallic → 乘 <code>_u_RoughnessMultiplier / _u_MetallicMultiplier</code>，叠 <code>_u_MulCol</code> 明度系数、<code>_u_AlbedoColor</code> tint。</div></div>
+<div class="step"><div class="n">3</div><div class="c"><b>抖动透明（stipple）</b>：按屏幕坐标做 4×4 抖动矩阵哈希，<code>alpha &lt; 阈值 → discard</code>——英雄淡入/淡出的低成本实现（配合 <code>_u_StippleAlpha</code>）。</div></div>
+<div class="step"><div class="n">4</div><div class="c"><b>法线贴图 → TBN</b>：N*2-1，T 叉乘重建（手性来自 <code>unity_WorldTransformParams.w</code>），归一化。</div></div>
+<div class="step"><div class="n">5</div><div class="c"><b>CSM 方向阴影</b>：法线偏移（<code>_ug_CSMNormalBias</code>）→ CSM 矩阵投影 → 距离淡出/包围盒剔除 → <b>4-tap 硬件比较采样 PCF</b> → 结果被 <code>_u_UseDirShadow</code> 的 <b>Select</b> 收尾（关了也照样采样，见前份报告）。</div></div>
+<div class="step"><div class="n">6</div><div class="c"><b>太阳遮挡（假 AO）</b>：世界 XZ 经 <code>_ug_SunOcclusionPosScaleOffset</code> 映射后采 256×128 遮挡图，调制 <code>_ug_LordLightIrradiance</code> 直射光。</div></div>
+<div class="step"><div class="n">7</div><div class="c"><b>直射光</b>：<code>_ug_LordLightDirection/Irradiance</code> 的 Lambert 漫反射 + Blinn-Phong 高光（金属度提亮 ×50，能量守恒近似 (2-NoV²)/(NoV²+...) 形式）。</div></div>
+<div class="step"><div class="n">8</div><div class="c"><b>IBL 环境光</b>：视线反射方向经 <b>atan 展开成 6 扇区旋转混合</b>，对 32×32 <code>LordEnvTexture</code> <b>双采样</b>（旋转角 <code>_ug_LordEnvRotationAngle</code>，基向量在 <code>_uc0.._uc6</code> 常量里），再乘 <b>DFG split-sum LUT</b>（512² <code>_us_DFGTexture</code>）——即移动端标准 IBL 近似。</div></div>
+<div class="step"><div class="n">9</div><div class="c"><b>FakeGI</b>：<code>_u_FakeGIColor × _u_HeroFakeGIColor</code> 补底部反弹光，加自发光 <code>_u_EmissiveColor</code>。</div></div>
+<div class="step"><div class="n">10</div><div class="c"><b>高度染色</b>：世界 Y 相对 <code>_u_ZeroHeightLine</code> 的归一化高度，向 <code>_u_HeightColor</code> 渐变——脚部/接缝压暗变脏的手法。</div></div>
+<div class="step"><div class="n">11</div><div class="c"><b>菲涅尔边缘光</b>：<code>(1-NoV)³</code> 形式，<code>_u_FresnelEffect/Color</code> 控制。</div></div>
+<div class="step"><div class="n">12</div><div class="c"><b>雾</b>：顶点算好的距离雾 + 域雾系数做颜色混合（<code>_ug_FogColor</code>）。</div></div>
+<div class="step"><div class="n">13</div><div class="c"><b>曝光 + 材质内 tonemap</b>：<code>_ug_ExposureScale/_u_ExposureColor</code> 曝光后，做<b>有理分式 filmic 曲线</b>：<pre>c_out = c*(c*0.533 + 0.151) / (c*(c*0.526 + 0.200) + 0.027)</pre>Hejl-Burgess-Dawson 风格——<b>tonemap 是逐材质在 shader 里做的</b>，不是全屏后处理（这修正了「无 tonemap」的说法：没有后处理 tonemap，但材质内有 filmic 曲线）。</div></div>
+
+<h2>五、纹理绑定（8 张）</h2>
+<table>
+  <tr><th>资源</th><th>格式 / 尺寸</th><th>推断用途</th></tr>
+  <tr><td class="mono">73518</td><td class="mono">RGBA8 512×512</td><td><code>_us_DFGTexture</code> — IBL split-sum DFG LUT</td></tr>
+  <tr><td class="mono">73519</td><td class="mono">RGBA8 256×256</td><td>Albedo（着色器内做 sRGB→线性）</td></tr>
+  <tr><td class="mono">73520</td><td class="mono">RGBA8 512×512</td><td>法线/材质参数图</td></tr>
+  <tr><td class="mono">73209</td><td class="mono">RGBA8 256×128</td><td><code>_ug_SunOcclusion</code> 太阳遮挡（假 AO）</td></tr>
+  <tr><td class="mono">296207</td><td class="mono"><b>D16</b> 1024×1024</td><td>CSM 方向光阴影图（比较采样 + 4-tap PCF）</td></tr>
+  <tr><td class="mono">16161</td><td class="mono">RGB8 32×32</td><td><code>_ug_LordEnvTexture</code> 环境反射图</td></tr>
+  <tr><td class="mono">15954 / 15955</td><td class="mono">RGBA8 4×4</td><td>占位白图（未启用的贴图槽）</td></tr>
+</table>
+
+<h2>六、特点与点评</h2>
+<ul>
+  <li><span class="tag g">省</span><b>单 draw 前向渲染</b>：一个合并网格 20706 索引一次画完，无第二遍 spec/light pass；32² 环境图 + DFG LUT 的 IBL 是移动端最便宜的 PBR 形态。</li>
+  <li><span class="tag g">省</span><b>无蒙皮</b>：顶点阶段只有 MVP 和两矩阵变换。英雄动画要么预烘焙进网格姿态，要么动画网格走其他变体（本帧抓到的为静态帧）。</li>
+  <li><span class="tag y">注意</span><b>filmic tonemap 在材质里</b>：管线无 HDR 缓冲、无全屏 tonemap，色调曲线逐像素做。这解释了「无泛光帧看起来仍有电影感对比度」；但也意味着<b>开 bloom 必须靠额外链路</b>（有泛光版本另见）。</li>
+  <li><span class="tag r">浪费</span><code>_u_UseDirShadow</code> 用 <b>Select</b> 而非分支/变体：关闭时 4-tap PCF 仍然执行，低端机白付采样成本（与前份 CSM 报告结论一致）。</li>
+  <li><span class="tag y">观感技巧</span>高度染色 + FakeGI + 菲涅尔 + 太阳遮挡，四个「假」字诀撑起立体感，成本都在 ALU 上，无额外带宽。</li>
+  <li><span class="tag y">阴影分工</span>：英雄本体采样 CSM（受场景影子影响），自己投给地面的影子用 blob 贴片——「受影」与「投影」分离，是自走棋俯视角的合理取舍。</li>
+</ul>
+
+<h2>附：EID 1497 上下文速查</h2>
+<table>
+  <tr><th>EID</th><th>内容</th></tr>
+  <tr><td class="mono">697–7104</td><td>Colour Pass #3 = 主场景 pass（含 1497）</td></tr>
+  <tr><td class="mono">1474 / 1497 / 1529 / 1559</td><td>同材质族连续网格：3294 / <b>20706（本 draw）</b> / 8370 / 24594 索引</td></tr>
+  <tr><td class="mono">80804 / 80805</td><td>主颜色 RT（2132×1198 RGBA8） / 主深度</td></tr>
+  <tr><td class="mono">73846 / 73847</td><td>本 draw 顶点 / 像素 shader（「Lord」PBR 材质族）</td></tr>
+</table>
+
+</div>
+</body>
+</html>

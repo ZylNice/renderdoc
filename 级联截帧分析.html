@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>MuMu 级联截帧分析 — GL 触发点实现与失败根因</title>
+<style>
+  body { background:#1e1e1e; color:#d4d4d4; font-family:"Segoe UI","Microsoft YaHei",sans-serif; max-width:1100px; margin:0 auto; padding:32px 40px; line-height:1.7; }
+  h1 { color:#4ec9b0; border-bottom:2px solid #4ec9b0; padding-bottom:8px; font-size:26px; }
+  h2 { color:#569cd6; margin-top:36px; font-size:20px; border-left:4px solid #569cd6; padding-left:10px; }
+  h3 { color:#9cdcfe; font-size:16px; margin-top:24px; }
+  code { background:#2d2d30; color:#ce9178; padding:1px 6px; border-radius:3px; font-family:Consolas,monospace; font-size:0.92em; }
+  pre { background:#0d0d0d; border:1px solid #333; border-radius:6px; padding:14px 18px; overflow-x:auto; font-family:Consolas,monospace; font-size:13px; line-height:1.5; color:#b5cea8; }
+  table { border-collapse:collapse; width:100%; margin:12px 0; }
+  th { background:#264f78; color:#fff; padding:8px 12px; text-align:left; }
+  td { border:1px solid #3c3c3c; padding:7px 12px; vertical-align:top; }
+  tr:nth-child(even) td { background:#252526; }
+  .ok { color:#6a9955; font-weight:bold; }
+  .bad { color:#f44747; font-weight:bold; }
+  .warn { color:#dcdcaa; font-weight:bold; }
+  .note { background:#2a2d2e; border-left:4px solid #dcdcaa; padding:10px 16px; margin:14px 0; border-radius:0 4px 4px 0; }
+  .flow { background:#111; border:1px dashed #555; padding:14px 20px; border-radius:6px; font-family:Consolas,monospace; font-size:13px; line-height:1.8; white-space:pre; color:#c5c5c5; margin:10px 0; }
+  .small { color:#888; font-size:12px; }
+</style>
+</head>
+<body>
+
+<h1>MuMu 级联截帧分析 — GL 触发点实现与失败根因</h1>
+<p class="small">分析对象：rendertest fork（RenderDoc 1.46） · 环境：MuMu 模拟器（MuMuNxDevice.exe） · 游戏：王者万象棋 · 日期：2026-09-22</p>
+
+<h2>一、背景：什么是级联截帧</h2>
+<p>MuMu 这类模拟器是“渲染与上屏分离”架构：后台多个 Vulkan 设备把游戏画到离屏 buffer，上屏设备（Vulkan swapchain 或 GLES 合成器）把画面刷到屏幕。原版 RenderDoc 只抓上屏设备，截出来的帧没有真正的 Draw Call。级联捕获桥接（提交 <code>8361dcee9</code> 引入）让任何一个设备触发捕获时，<b>同进程</b>设备表（<code>m_DeviceFrameCapturers</code>）里所有 Vulkan 设备跟着一起 <code>StartFrameCapture</code> / <code>EndFrameCapture</code>。</p>
+<p>原实现的触发点只挂在 <code>WrappedVulkan::Present</code>（<code>renderdoc/driver/vulkan/vk_core.cpp:3583-3593</code>），GL 上屏时桥接不启动。</p>
+
+<h2>二、本次实现：GL Present 也能触发级联</h2>
+<table>
+  <tr><th style="width:200px">文件</th><th>改动</th></tr>
+  <tr><td><code>renderdoc/core/core.cpp:2364</code></td><td>放开 owner 驱动限制：原要求触发者必须是 Vulkan，改为 <b>owner 不限驱动</b>（GL 呈现设备可做 owner）；follower 仍只收 Vulkan 设备</td></tr>
+  <tr><td><code>renderdoc/driver/gl/gl_driver.cpp:2243-2248</code></td><td>GL Present 的 <code>StartFrameCapture</code>/<code>EndFrameCapture</code> 换成桥接版 <code>StartVulkanBridgeFrameCapture(this, devWnd)</code> / <code>EndVulkanBridgeFrameCapture(this, devWnd)</code></td></tr>
+  <tr><td><code>util/mumu-capture/README.md</code></td><td>同步文档：已知限制“触发点只挂在 Vulkan”标记为已修</td></tr>
+</table>
+<p class="note"><b>验证：</b>GL 截帧日志中已出现 <code>Vulkan bridge diagnostics: starting 1 capturers from owner ...（device 0x00010002 = GL 上下文）</code>——触发点生效，桥接 start/end 正常配对。</p>
+
+<h2>三、日志对比：为什么 Vulkan 能级联、OpenGL 不能</h2>
+
+<h3>两份会话（同一日志 <code>%TEMP%\RenderTest\RenderDoc_2026.09.22_10.35.54.log</code>）</h3>
+<table>
+  <tr><th style="width:140px">会话</th><th>进程</th><th>触发</th><th>结果</th></tr>
+  <tr><td>12:02 / 12:04 Vulkan 模式</td><td>036064</td><td><code>WrappedVulkan::Present</code></td><td class="ok">starting <b>3</b> capturers —— 级联正常，产出 capture.rdc(718MB) + capture_2.rdc + frame10700.rdc</td></tr>
+  <tr><td>10:46 OpenGL 模式</td><td>051540</td><td><code>WrappedOpenGL::Present</code>（本次新挂载）</td><td class="bad">starting <b>1</b> capturers —— 只抓到自己</td></tr>
+</table>
+
+<h3>关键证据（<code>%TEMP%\RenderDoc\RenderDoc_app_2026.09.22_10.41.56.log</code>）</h3>
+<p>MuMuNxDevice.exe（PID 051540，即 GL 截帧所在进程）的应用日志显示——<b>同一进程里同时存在 GL 上屏与 Vulkan 渲染设备</b>，MuMu 是单进程架构，并非跨进程问题：</p>
+<pre>10:41:32  RenderTest 构建 (dc8ac178) 注入 PID 051540        ← 截帧用的工具
+10:41:56  renderdoc 构建 (e4bd23b6) 又注入同一进程           ← 第二次注入
+10:41:57  Adding Vulkan device frame capturer 0x...D5A23270  ← Vulkan 设备 1
+10:41:58  Adding Vulkan device frame capturer 0x...DC1B9EE0  ← Vulkan 设备 2
+          （注册者是 e4bd23b6 构建，不是 dc8ac178）</pre>
+
+<h3>根因：双 build 注入冲突，Vulkan 设备注册错了家</h3>
+<div class="flow">MuMuNxDevice.exe（单进程：GL 上屏 + Vulkan 渲染设备都在）
+  ├─ 10:41:32 注入 RenderTest (dc8ac178)  ← GL hook 生效，设备表只收了 GL 上下文
+  ├─ 10:41:56 注入 renderdoc (e4bd23b6)   ← 第二次注入
+  └─ 10:41:57 游戏创建 Vulkan 实例
+        ↓ VK_LAYER_RENDERDOC_Capture 的 manifest 只指向一份 dll（e4bd23b6）
+        ↓ Vulkan 设备注册进了 e4bd23b6 的 m_DeviceFrameCapturers
+  10:46 GL Present → RenderTest 触发桥接 → 它的表里一个 Vulkan 都没有 → N=1</div>
+<p>Vulkan 模式那次（12:02，PID 036064）只有一份注入，3 个 Vulkan 设备同进程同一张表，Present 一触发全部带上。</p>
+
+<h2>四、结论</h2>
+<table>
+  <tr><th style="width:200px">问题</th><th>结论</th></tr>
+  <tr><td>GL 能否触发级联</td><td class="ok">能 —— 本次改动生效，日志可见 GL owner 的 bridge start/end</td></tr>
+  <tr><td>GL 截帧为何 N=1</td><td>同一进程被 RenderTest 与 renderdoc 两份构建<b>双重注入</b>；Vulkan layer manifest 指向后者，Vulkan 设备注册进了后者的进程内表，RenderTest 的表里看不到</td></tr>
+  <tr><td>Vulkan 为何正常</td><td>单一注入，渲染设备与上屏设备同进程同表</td></tr>
+  <tr><td>是否跨进程问题</td><td class="warn">否 —— MuMu 是单进程；跨进程限制（README 已知限制 #1）在本场景无关</td></tr>
+</table>
+
+<h2>五、规避方法与遗留问题</h2>
+<ul>
+  <li><b>规避</b>：GL 模式截帧前确保 MuMuNxDevice.exe 只被 RenderTest 一份注入（重启模拟器进程，不要同时挂原版 renderdoc），Vulkan 设备即会注册进 RenderTest 的表，GL 触发的级联即可带上它们。</li>
+  <li><b>遗留 1</b>：follower 仍只收 Vulkan 设备；后台渲染设备为 D3D12 时级联带不上。</li>
+  <li><b>遗留 2</b>：D3D11/D3D12 的 Present 未挂触发点（同两行模式可照搬）。</li>
+  <li><b>遗留 3</b>：UI 侧 discard 只丢匹配到的 capturer，owner 捕获被丢弃时 follower 可能残留（Vulkan owner 原有问题）。</li>
+  <li><b>遗留 4</b>：若未来遇到真正多进程的模拟器（渲染进程 ≠ 上屏进程），需新增跨进程通道（共享内存注册表或 target-control 广播）。</li>
+</ul>
+
+<p class="small">数据来源：%TEMP%\RenderTest\RenderDoc_2026.09.22_10.35.54.log、%TEMP%\RenderDoc\RenderDoc_app_2026.09.22_10.41.56.log、renderdoc 源码（core/core.cpp、driver/gl/gl_driver.cpp、driver/vulkan/vk_core.cpp）。</p>
+
+</body>
+</html>

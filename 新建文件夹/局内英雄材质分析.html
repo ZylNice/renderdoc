@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王者万象棋 局内 · 英雄材质完整分析（EID 618 / PS 75311）</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#3a2a1b,#1b2a4a);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#c9b28f;font-size:14px}
+  main{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #e0a53a;padding-left:12px;margin:40px 0 16px;color:#ffe1a8}
+  h3{font-size:16px;color:#ffd479;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:#2a2417;color:#ffd479;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#ffd479;font-size:12.5px}
+  pre{background:#0a0f1a;border:1px solid #26324c;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55;color:#c9d6ee}
+  .note{background:#241f14;border-left:3px solid #e0a53a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#e8d9b8;margin:12px 0}
+  .ok{background:#14301f;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .warn{background:#331a1a;border-left:3px solid #e05a5a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#f0c8c8;margin:12px 0}
+  .formula{background:#171408;border:1px dashed #6b5426;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:12.5px;color:#f0dfa8;white-space:pre-wrap}
+  .flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0;font-size:12.5px}
+  .flow .step{background:#241f14;border:1px solid #6b5426;border-radius:6px;padding:5px 10px}
+  .flow .arrow{color:#e0a53a}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>英雄材质完整分析报告（局内战斗）</h1>
+  <div class="sub">
+    Shader：PS <code>ResourceId::75311</code> / VS <code>ResourceId::75310</code> ｜ 代表 draw：EID 618 <code>glDrawElements</code>（8967 索引）｜
+    截帧：<code>局内-有泛光.rdc</code>（王者万象棋，OpenGL ES）
+  </div>
+</header>
+<main>
+
+<h2>0. 归属与影响范围</h2>
+<div class="ok">局内英雄 shader 与局外（64775/64777）<b>常量表逐项一致</b>（VS 23 项 / PS 22 项、同 3 纹理配置），属同一英雄渲染架构，仅 ResourceId 与贴图实例不同。本帧英雄 draw 特征：<b>8 组英雄 × 2 连发</b>（本体+描边/阴影壳，如 EID 618/634 同为 8967 索引），另在 Colour Pass #19 出现第二组 8 个（EID 8349–8522，第二相机/展示 RT）。同一 program 的任何修改对所有实例同时生效。</div>
+<table>
+  <tr><th>本帧英雄索引规模</th><td>7539 / 7743 / 8811 / 8832 / 8961 / 8967 / 8982 / 8997 / 9000（8 个英雄，网格略有差异）</td></tr>
+  <tr><th>本帧纹理实例</th><td>MainTex <code>77150</code>（256²/9mips）+ LightTex <code>379746</code>（256²）+ MatCup <code>379745</code>（256²）</td></tr>
+</table>
+
+<h2>1. 接口映射</h2>
+<h3>1.1 顶点输入（VS 75310 传入）</h3>
+<table>
+  <tr><th>变量</th><th>分量</th><th>含义</th></tr>
+  <tr><td><code>_uvs_TEXCOORD0</code></td><td>xy</td><td>主 UV（MainTex / LightTex 共用）</td></tr>
+  <tr><td><code>_uvs_TEXCOORD1</code></td><td>xyz / w</td><td>xyz=环境调制（顶点烘焙 AO/环境色）；w=<b>直接光强度系数</b></td></tr>
+  <tr><td><code>_uvs_TEXCOORD2</code></td><td>xy / z / w</td><td>xy=Matcap UV 源（视角法线）；z=高光基数（F0 项）；w=<b>高光衰减/AO</b></td></tr>
+  <tr><td><code>_uvs_TEXCOORD3</code></td><td>xyz / w</td><td>xyz=VS 加色①（Rim/Hurt 通路）；w=Fresnel 强度系数</td></tr>
+  <tr><td><code>_uvs_TEXCOORD4</code></td><td>xyz</td><td>VS 加色②（×_u_MulColor，受击/技能染色）</td></tr>
+  <tr><td><code>_uvs_TEXCOORD7</code></td><td>x</td><td><b>英雄雾因子</b>（VS 由 _ug_HeroFogParam/_ug_HeroFogIntensity 预算）</td></tr>
+</table>
+<h3>1.2 纹理</h3>
+<table>
+  <tr><th>变量</th><th>尺寸/Mip</th><th>通道用途</th></tr>
+  <tr><td><code>_u_MainTex</code></td><td>256² / 9 mips</td><td>rgb=Albedo（×_u_BaseColor；sRGB 多项式解码）；a 未使用</td></tr>
+  <tr><td><code>_u_LightTex</code></td><td>256² / 1 mip</td><td><b>x=粗糙度　y=金属度　z=AO+Fresnel 遮罩　w=Glow 遮罩</b>（一图四用）</td></tr>
+  <tr><td><code>_u_HeroMatCup</code></td><td>256² / 1 mip</td><td>Matcap 图集（rgb 采样后平方≈转线性；<b>a=高光 ramp</b>；LOD=lerp(1,rough,T2.w)×6）</td></tr>
+</table>
+
+<h2>2. 执行流程总览</h2>
+<div class="flow">
+  <span class="step">① Albedo×BaseColor</span><span class="arrow">→</span>
+  <span class="step">② LightTex 解包</span><span class="arrow">→</span>
+  <span class="step">③ 金属增益+sRGB解码</span><span class="arrow">→</span>
+  <span class="step">④ Matcap 环境高光</span><span class="arrow">→</span>
+  <span class="step">⑤ 直接光</span><span class="arrow">→</span>
+  <span class="step">⑥ Fresnel</span><span class="arrow">→</span>
+  <span class="step">⑦ Glow</span><span class="arrow">→</span>
+  <span class="step">⑧ VS 加色(T3/T4)</span><span class="arrow">→</span>
+  <span class="step">⑨ 亮度雾</span><span class="arrow">→</span>
+  <span class="step">⑩ 保饱和修正</span><span class="arrow">→</span>
+  <span class="step">⑪ 曝光/HDR</span><span class="arrow">→</span>
+  <span class="step">⑫ Filmic Tonemap</span><span class="arrow">→</span>
+  <span class="step">输出(a=PlayerId)</span>
+</div>
+
+<h2>3. 关键代码段精解</h2>
+<h3>① Albedo 与金属度增益</h3>
+<div class="formula">albedo = texture(_u_MainTex, uv).rgb * _u_BaseColor.rgb;
+albedoLuma = dot(albedo0, vec3(0.22, 0.707, 0.071));       // 备用（反射提亮）
+metal = clamp(LightTex.y * MetalRemap.y + MetalRemap.x, 0, 1);
+albedo *= lerp(_ug_HeroNonMetalAlbedoIntensity, _ug_HeroMetalAlbedoIntensity, metal);
+albedo += metal * albedo * _u_MetallicAlbedoMultiplier;
+albedo *= albedo * (albedo * 0.305306 + 0.682171) + 0.012523;   // sRGB 快速解码</div>
+<h3>② 粗糙度与 Matcap</h3>
+<div class="formula">rough = lerp(1.0, clamp(LightTex.x * RoughRemap.y + RoughRemap.x, 0, 1), T2.w);
+matcap = textureLod(_u_HeroMatCup, T2.xy*0.5+0.5, rough*6.0);  matcap.rgb²=转线性</div>
+<h3>③ 环境高光</h3>
+<div class="formula">F0 = T2.z * clamp(0.532 - rough, 0, 1) + (1 - metal) * 0.04;
+specRamp = metal * albedo + F0;
+env = matcap.rgb × HeroEvnIntensity × specRamp × T1.xyz
+    × lerp(NonMetalRef, MetalRef, metal) × (1 + AOIntensity·(LightTex.z−1))
+    × (albedoLuma^AlbedoLuminancePower × ReflectionBrightenIntensity + 1);</div>
+<h3>④ 直接光 ⑤ Fresnel ⑥ Glow ⑦ VS 加色</h3>
+<div class="formula">direct = (T1.w × _ug_HeroLightIrradiance) × (matcap.a × specRamp × T2.w);
+fresnel = (UseFullFresnel ? 1−LightTex.z : LightTex.z) × T3.w × _u_FresnelColor.rgb;
+glow = LightTex.w × _u_GlowColor² × _u_GlowIntension;
+color += clamp(T4.xyz)·_u_MulColor + clamp(T3.xyz);   // 受击染色 / Rim·Hurt</div>
+<h3>⑧ 亮度雾（保饱和）</h3>
+<div class="formula">diff = luma(_ug_HeroFogColor.rgb) − luma(color);    // 权重 (0.3, 0.59, 0.11)
+fogged = color + diff × _uvs_TEXCOORD7;             // 只推亮度不动色相
+minC&lt;0 → 沿亮度方向回拉；maxC&gt;1 → 向亮度压缩        // 保饱和修正</div>
+<h3>⑨ 曝光 / HDR / Tonemap / 输出</h3>
+<div class="formula">color ×= (_ug_ExposureScale.rgb + 1) × _u_ExposureColor;
+if (_ug_ExposureScale.w &gt; 0) HDR 分支（w&gt;1 不压，否则 ×0.5），a=PlayerId;
+ldr = c·(0.533c+0.151)/(c·(0.526c+0.200)+0.027);  a=PlayerId;   // Filmic
+out = HDR ? hdr : ldr;   // 本帧"有泛光"：HDR 分支输出供 Bloom 阈值提取亮斑</div>
+<div class="warn">本截帧为<b>有泛光</b>版本：英雄 HDR 输出经后续 Bloom 链（EID 7063 起，阈值 _u_Threshold 提取）产生辉光。若英雄高光/Glow 过曝导致泛光糊一片，排查顺序：先看 _ug_ExposureScale.w 是否走 HDR 分支 → 再看 Bloom 阈值 → 最后才是材质本身。</div>
+
+<h2>4. 常量速查</h2>
+<h3>4.1 PS $Globals（22 项）</h3>
+<table>
+  <tr><th>常量</th><th>含义</th><th>常量</th><th>含义</th></tr>
+  <tr><td>_u_BaseColor</td><td>Albedo 染色</td><td>_ug_HeroFogColor</td><td><b>英雄雾颜色</b>（仅取亮度）</td></tr>
+  <tr><td>_u_RoughnessMinMaxRemap / _u_MetallicMinMaxRemap</td><td>粗糙度/金属度 (min,max)</td><td>_u_MetallicAlbedoMultiplier</td><td>金属 Albedo 增益</td></tr>
+  <tr><td>_ug_HeroMetal/NonMetalAlbedoIntensity</td><td>金属/非金属 Albedo 强度</td><td>_ug_HeroMetal/NonMetalRefIntensity</td><td>金属/非金属反射强度</td></tr>
+  <tr><td>_u_AOIntensity</td><td>AO 强度</td><td>_u_AlbedoLuminancePower</td><td>Albedo 亮度幂次</td></tr>
+  <tr><td>_u_ReflectionBrightenIntensity</td><td>亮部反射提亮</td><td>_ug_HeroEvnIntensity</td><td>Matcap 环境强度</td></tr>
+  <tr><td>_ug_HeroLightIrradiance</td><td>主光辐照色</td><td>_u_GlowColor / _u_GlowIntension</td><td>自发光颜色/强度</td></tr>
+  <tr><td>_u_FresnelColor</td><td>Fresnel 颜色</td><td>_u_UseFullFresnel</td><td>Fresnel 遮罩取反开关</td></tr>
+  <tr><td>_u_MulColor</td><td>VS 加色②系数</td><td>_u_ExposureColor</td><td>曝光染色（用两次）</td></tr>
+  <tr><td>_ug_ExposureScale</td><td>rgb 曝光偏移；w=HDR 开关/阈值</td><td>_u_PlayerId</td><td>玩家 ID → alpha</td></tr>
+</table>
+<h3>4.2 VS $Globals（23 项，雾/加色源头）</h3>
+<table>
+  <tr><th>常量</th><th>含义</th></tr>
+  <tr><td>_ug_HeroFogColor / _ug_HeroFogIntensity / _ug_HeroFogParam</td><td><b>雾颜色/强度/距离参数</b>（vs_TEXCOORD7 的源头）</td></tr>
+  <tr><td>_u_RimColor / _u_RimLightDirWS / _u_RimLightAtten(2) / _u_FresnelPow / _u_FresnelIntension / _u_DIRFRESNEL</td><td>Rim 光系统（VS 算好经 T3 传出）</td></tr>
+  <tr><td>_u_HurtColor / _u_TriggerLevelOffset</td><td>受击染色</td></tr>
+  <tr><td>_ug_HeroEnableFixedCamera / _ug_HeroFixedCameraPosition</td><td><b>局内固定相机</b>（战镜视角修正 Matcap/反射方向）</td></tr>
+  <tr><td>_ug_HeroEnvColor / _ug_HeroEvnIntensity / _ug_HeroLightDirection</td><td>环境色/强度/主光方向</td></tr>
+  <tr><td>_u_HightOffset / _u_WorldSpaceCameraPos + 4 矩阵</td><td>高度偏移/相机/变换</td></tr>
+</table>
+
+</main>
+<footer>由 RenderDoc MCP（renderdoc）截帧分析生成 ｜ 局内-有泛光.rdc ｜ EID 618 ｜ PS 75311 / VS 75310</footer>
+</body>
+</html>

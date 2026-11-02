@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MAX 局外 · 英雄材质 FS 分析（EID 1652）</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1420;color:#dfe6f2;font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7}
+  header{background:linear-gradient(135deg,#3a2a1b,#1b2a4a);padding:36px 48px;border-bottom:1px solid #33415e}
+  header h1{margin:0 0 8px;font-size:26px}
+  header .sub{color:#c9b28f;font-size:14px}
+  main{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
+  h2{font-size:20px;border-left:4px solid #e0a53a;padding-left:12px;margin:40px 0 16px;color:#ffe1a8}
+  h3{font-size:16px;color:#ffd479;margin:24px 0 8px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:#141b2c}
+  th,td{border:1px solid #2a3854;padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:#2a2417;color:#ffd479;font-weight:600}
+  code,pre{font-family:"Cascadia Code",Consolas,monospace}
+  code{background:#0a0f1a;padding:1px 6px;border-radius:4px;color:#ffd479;font-size:12.5px}
+  pre{background:#0a0f1a;border:1px solid #26324c;border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.55;color:#c9d6ee}
+  .note{background:#241f14;border-left:3px solid #e0a53a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#e8d9b8;margin:12px 0}
+  .ok{background:#14301f;border-left:3px solid #3ad0a0;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#c9f5e4;margin:12px 0}
+  .warn{background:#331a1a;border-left:3px solid #e05a5a;padding:10px 16px;border-radius:0 6px 6px 0;font-size:13.5px;color:#f0c8c8;margin:12px 0}
+  .formula{background:#171408;border:1px dashed #6b5426;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:Consolas,monospace;font-size:12.5px;color:#f0dfa8;white-space:pre-wrap}
+  .flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0;font-size:12.5px}
+  .flow .step{background:#241f14;border:1px solid #6b5426;border-radius:6px;padding:5px 10px}
+  .flow .arrow{color:#e0a53a}
+  footer{text-align:center;color:#5a6a8c;font-size:12px;padding:24px;border-top:1px solid #223050}
+</style>
+</head>
+<body>
+<header>
+  <h1>英雄材质像素着色器分析报告（局外）</h1>
+  <div class="sub">
+    Shader：PS <code>ResourceId::64777</code> / VS <code>ResourceId::64775</code> ｜ 代表 draw：EID 1652 <code>glDrawElements</code>（8988 索引）｜
+    RT：<code>ResourceId::69655</code> ｜ 来源：RenderDoc 反编译 GLSL 450 ｜ 截帧：MAX-局外-真机截帧.rdc（OpenGL ES）
+  </div>
+</header>
+<main>
+
+<h2>0. 归属与关联</h2>
+<div class="ok">本 GLSL 即局外英雄 FS（64777）：3 张 256² 纹理 + $Globals 22 个常量 + 6 路 varying。EID 1652（8988 索引）与 EID 1745（666 索引）共用<b>同一 shader program</b>——Shader Edit 一旦 Apply，<b>所有使用该 program 的英雄 draw 同时生效</b>。</div>
+<div class="warn">若此前做过"输出纯白"的实验修改（末尾 <code>_uSV_Target0 = vec4(1.0);</code>），请先删除该行再开始材质/雾效调试。</div>
+
+<h2>1. 接口映射</h2>
+<h3>1.1 顶点输入（VS 64775 传入的 varying）</h3>
+<table>
+  <tr><th>变量</th><th>分量</th><th>含义</th></tr>
+  <tr><td><code>_uvs_TEXCOORD0</code></td><td>xy</td><td>主 UV（_u_MainTex / _u_LightTex 共用）</td></tr>
+  <tr><td><code>_uvs_TEXCOORD1</code></td><td>xyz</td><td>环境项调制（乘 Matcap 环境结果；顶点烘焙 AO/环境色）</td></tr>
+  <tr><td><code>_uvs_TEXCOORD1</code></td><td>w</td><td><b>直接光强度系数</b>（×_ug_HeroLightIrradiance 得主光辐照）</td></tr>
+  <tr><td><code>_uvs_TEXCOORD2</code></td><td>xy</td><td>Matcap UV 源（视角空间法线 xy；×0.5+0.5 映射到 [0,1]）</td></tr>
+  <tr><td><code>_uvs_TEXCOORD2</code></td><td>z</td><td>高光基数（参与 F0 项：<code>z × clamp(0.532−lod) + (1−metal)×0.04</code>）</td></tr>
+  <tr><td><code>_uvs_TEXCOORD2</code></td><td>w</td><td><b>高光衰减/AO</b>：lerp 粗糙度（1→rough）、乘 spec ramp、乘环境项</td></tr>
+  <tr><td><code>_uvs_TEXCOORD3</code></td><td>xyz</td><td>VS 加色①（clamp 0..1 后直加；对应 VS 的 RimColor/HurtColor 通路）</td></tr>
+  <tr><td><code>_uvs_TEXCOORD3</code></td><td>w</td><td>Fresnel 强度系数（乘在 fresnel 权重上）</td></tr>
+  <tr><td><code>_uvs_TEXCOORD4</code></td><td>xyz</td><td>VS 加色②（clamp 0..1，×_u_MulColor 后直加）</td></tr>
+  <tr><td><code>_uvs_TEXCOORD7</code></td><td>x</td><td><b>英雄雾因子</b>（VS 由 _ug_HeroFogParam/_ug_HeroFogIntensity 预算，0=无雾 1=全雾）</td></tr>
+</table>
+<h3>1.2 纹理</h3>
+<table>
+  <tr><th>变量</th><th>ResourceId</th><th>尺寸/Mip</th><th>通道用途</th></tr>
+  <tr><td><code>_u_MainTex</code></td><td>67240</td><td>256² / 9 mips</td><td>rgb = Albedo（×_u_BaseColor 染色；走 sRGB 多项式解码）；a 未使用</td></tr>
+  <tr><td><code>_u_LightTex</code></td><td>67527</td><td>256² / 1 mip</td><td><b>x = 粗糙度遮罩　y = 金属度遮罩　z = AO + Fresnel 遮罩（一图两用）　w = 自发光(Glow)遮罩</b></td></tr>
+  <tr><td><code>_u_HeroMatCup</code></td><td>67526</td><td>256² / 1 mip</td><td>Matcap 高光图集（rgb 采样后平方≈转线性；<b>a = 高光 ramp 遮罩</b>）；LOD = lerp(1, rough, T2.w)×6 手动指定</td></tr>
+</table>
+
+<h2>2. 执行流程总览</h2>
+<div class="flow">
+  <span class="step">① Albedo×BaseColor</span><span class="arrow">→</span>
+  <span class="step">② LightTex 解包(粗糙/金属/AO/Glow)</span><span class="arrow">→</span>
+  <span class="step">③ 金属度 Albedo 增益+sRGB解码</span><span class="arrow">→</span>
+  <span class="step">④ Matcap 环境高光</span><span class="arrow">→</span>
+  <span class="step">⑤ 直接光(HeroLightIrradiance)</span><span class="arrow">→</span>
+  <span class="step">⑥ Fresnel 边缘光</span><span class="arrow">→</span>
+  <span class="step">⑦ Glow 自发光</span><span class="arrow">→</span>
+  <span class="step">⑧ VS 加色(T3/T4)</span><span class="arrow">→</span>
+  <span class="step">⑨ 亮度雾</span><span class="arrow">→</span>
+  <span class="step">⑩ 保饱和修正</span><span class="arrow">→</span>
+  <span class="step">⑪ 曝光/HDR压半</span><span class="arrow">→</span>
+  <span class="step">⑫ Filmic Tonemap</span><span class="arrow">→</span>
+  <span class="step">输出(a=PlayerId)</span>
+</div>
+
+<h2>3. 关键代码段精解</h2>
+
+<h3>① Albedo 与金属度增益</h3>
+<div class="formula">albedo = texture(_u_MainTex, uv).rgb * _u_BaseColor.rgb;
+albedoLuma = dot(albedo0, vec3(0.22, 0.707, 0.071));      // 存下备用（反射提亮）
+metalMask = clamp(LightTex.y * MetalRemap.y + MetalRemap.x, 0, 1);
+albedo *= lerp(_ug_HeroNonMetalAlbedoIntensity, _ug_HeroMetalAlbedoIntensity, metalMask);
+albedo += metalMask * albedo * _u_MetallicAlbedoMultiplier;   // 金属额外提亮
+// sRGB 快速解码（三次多项式）：c*(c*0.305306 + 0.682171) + 0.012523
+albedo *= albedo * (albedo * 0.305306 + 0.682171) + 0.012523;</div>
+
+<h3>② 粗糙度与 Matcap LOD</h3>
+<div class="formula">rough = clamp(LightTex.x * RoughRemap.y + RoughRemap.x, 0, 1);
+rough = lerp(1.0, rough, T2.w);            // T2.w=0 时强制最粗糙（关掉高光条带）
+matcupLOD = rough * 6.0;                    // 图集 6 档粗糙度
+matcap = textureLod(_u_HeroMatCup, T2.xy*0.5+0.5, matcupLOD);
+matcap.rgb = matcap.rgb²;                   // 平方近似 gamma→线性</div>
+
+<h3>③ 环境高光（Matcap × F0 ramp）</h3>
+<div class="formula">F0base = lerp(0.04, 0, metalMask);                       // 非金属 0.04
+F0 = T2.z * clamp(0.532 - rough, 0, 1) + F0base;         // T2.z=高光基数
+specRamp = metalMask * albedo + F0;                      // 金属吃 albedo 色
+env = matcap.rgb * _ug_HeroEvnIntensity * specRamp * T1.xyz;   // T1.xyz=环境调制
+env *= lerp(_ug_HeroNonMetalRefIntensity, _ug_HeroMetalRefIntensity, metalMask);
+env *= (1 + _u_AOIntensity * (LightTex.z - 1));          // AO 压暗
+env *= (albedoLuma^AlbedoLuminancePower × ReflectionBrightenIntensity + 1); // 亮部反射更亮</div>
+
+<h3>④ 直接光（高光 ramp 驱动）</h3>
+<div class="formula">direct = (T1.w × _ug_HeroLightIrradiance)   // 主光辐照（VS 算好 NdotL/衰减）
+       × (matcap.a × specRamp × T2.w);      // matcup alpha = 高光形状 ramp
+color = albedo通路×specRamp + env + direct×反射强度lerp;</div>
+
+<h3>⑤ Fresnel 边缘光</h3>
+<div class="formula">fmask = _u_UseFullFresnel ? (1 - LightTex.z) : LightTex.z;   // 复用 z 通道
+fresnel = fmask × T3.w;                       // T3.w = VS 算的 NdotV 类权重
+color += fresnel × _u_FresnelColor.rgb;</div>
+
+<h3>⑥ Glow 自发光 与 VS 加色</h3>
+<div class="formula">glow = LightTex.w × _u_GlowColor² × _u_GlowIntension;   // 颜色平方=增强饱和
+color = color×曝光预乘 + glow;
+color += clamp(T4.xyz, 0, 1) × _u_MulColor;   // VS 加色②（受击/技能染色）
+color += clamp(T3.xyz, 0, 1);                 // VS 加色①（Rim/Hurt）</div>
+
+<h3>⑦ 亮度雾（保饱和，调试点见 §5）</h3>
+<div class="formula">fogLuma  = dot(_ug_HeroFogColor.rgb, vec3(0.3, 0.59, 0.11));
+pixLuma  = dot(color, vec3(0.3, 0.59, 0.11));
+diff     = fogLuma - pixLuma;
+fogged   = color + diff × _uvs_TEXCOORD7;     // ★ 只推亮度，不动色相
+newLuma  = pixLuma + diff × _uvs_TEXCOORD7;
+// 保饱和修正：通道越界则沿亮度方向回拉/压缩
+if (min(fogged) &lt; 0) fogged = newLuma + (fogged - newLuma) × newLuma / (newLuma - minC);
+if (max(fogged) &gt; 1) fogged = newLuma + (fogged - newLuma) × (1 - newLuma) / (maxC - newLuma);</div>
+
+<h3>⑧ 曝光 / HDR / Tonemap / 输出</h3>
+<div class="formula">color *= (_ug_ExposureScale.rgb + 1) × _u_ExposureColor;   // 两级染色
+if (_ug_ExposureScale.w &gt; 0) {                            // HDR 模式
+    hdrColor = _ug_ExposureScale.w &gt; 1 ? color : color×0.5;
+    hdrColor.a = _u_PlayerId;                            // HDR 分支输出
+}
+ldr = c×(0.533c+0.151) / (c×(0.526c+0.200)+0.027);       // Filmic 有理曲线
+ldr.a = _u_PlayerId;
+out = HDR模式 ? hdrColor : ldr;                          // alpha 恒为 PlayerId</div>
+<div class="note">alpha 通道写 <code>_u_PlayerId</code> 而非透明度——供后续 pass（描边/选中/阵营区分）做像素级识别，调试时别把 RT 当普通 RGBA 颜色读 a 通道。</div>
+
+<h2>4. 常量速查（$Globals，22 项）</h2>
+<table>
+  <tr><th>常量</th><th>含义</th><th>常量</th><th>含义</th></tr>
+  <tr><td>_u_BaseColor</td><td>Albedo 染色</td><td>_ug_HeroFogColor</td><td><b>英雄雾颜色</b>（仅取亮度）</td></tr>
+  <tr><td>_u_RoughnessMinMaxRemap</td><td>粗糙度 (min,max)</td><td>_u_MetallicMinMaxRemap</td><td>金属度 (min,max)</td></tr>
+  <tr><td>_ug_HeroMetal/NonMetalAlbedoIntensity</td><td>金属/非金属 Albedo 强度</td><td>_u_MetallicAlbedoMultiplier</td><td>金属 Albedo 额外增益</td></tr>
+  <tr><td>_ug_HeroMetal/NonMetalRefIntensity</td><td>金属/非金属反射强度</td><td>_u_ReflectionBrightenIntensity</td><td>亮部反射提亮</td></tr>
+  <tr><td>_u_AOIntensity</td><td>AO 强度</td><td>_u_AlbedoLuminancePower</td><td>Albedo 亮度幂次</td></tr>
+  <tr><td>_ug_HeroLightIrradiance</td><td>主光辐照色</td><td>_ug_HeroEvnIntensity</td><td>Matcap 环境强度</td></tr>
+  <tr><td>_u_GlowColor / _u_GlowIntension</td><td>自发光颜色/强度</td><td>_u_FresnelColor</td><td>Fresnel 边缘光颜色</td></tr>
+  <tr><td>_u_UseFullFresnel</td><td>Fresnel 遮罩取反开关</td><td>_u_MulColor</td><td>VS 加色②系数</td></tr>
+  <tr><td>_u_ExposureColor</td><td>曝光染色（用两次）</td><td>_ug_ExposureScale</td><td>rgb 曝光偏移；w=HDR 开关/阈值</td></tr>
+  <tr><td>_u_PlayerId</td><td>玩家 ID → 输出 alpha</td><td></td><td></td></tr>
+</table>
+
+<h2>5. Shader Edit 调试配方</h2>
+<p>操作：Event Browser 选 EID 1652 → Pipeline State → FS 64777 → <b>Edit</b> → 修改 → <b>Refresh</b>。所有插入语句中的临时变量名可直接用对应代码段的寄存器名。</p>
+
+<h3>5.1 雾效调试</h3>
+<table>
+  <tr><th>目的</th><th>改法</th></tr>
+  <tr><td>可视化雾因子分布</td><td>main 开头插 <code>_uSV_Target0 = vec4(vec3(_uvs_TEXCOORD7), 1.0); return;</code>（黑=无雾，白=全雾）</td></tr>
+  <tr><td>关闭雾</td><td>雾混合行 <code>(_uu_xlat16_2.xyz = ((_uu_xlat16_1.xxx * vec3(_uvs_TEXCOORD7)) + _uu_xlat16_0.xyz));</code> 改为 <code>(_uu_xlat16_2.xyz = _uu_xlat16_0.xyz);</code>（后续保饱和修正自动退化为近似原色）</td></tr>
+  <tr><td>雾拉满看极限</td><td>同一行里 <code>_uvs_TEXCOORD7</code> 替换为 <code>1.0</code></td></tr>
+  <tr><td>雾色标红看范围</td><td>fogLuma 那行 <code>dot(_ug_HeroFogColor.xyz, ...)</code> 改为 <code>dot(vec3(10.0, 0.0, 0.0), ...)</code></td></tr>
+  <tr><td>验证保饱和修正是否触发</td><td>在两个 <code>bool(_uu_xlatb0) ? ...</code> 选择行分别输出纯红/纯蓝：<code>_uSV_Target0 = vec4(_uu_xlatb0 ? vec3(1,0,0) : vec3(0,0,1), 1.0); return;</code></td></tr>
+  <tr><td>调雾远近/浓度曲线</td><td>PS 改不了——因子在 VS 64775 内由 <code>_ug_HeroFogParam</code> / <code>_ug_HeroFogIntensity</code> 算出，Edit VS 中写 <code>vs_TEXCOORD7</code> 的语句乘系数即可</td></tr>
+</table>
+
+<h3>5.2 材质分项隔离</h3>
+<table>
+  <tr><th>目的</th><th>改法（插入位置 = 对应代码段算完之后）</th></tr>
+  <tr><td>看原始 Albedo</td><td>① 段 sRGB 解码后：<code>_uSV_Target0 = vec4(_uu_xlat16_10.xyz, 1.0); return;</code></td></tr>
+  <tr><td>看粗糙度/金属度</td><td>② 段 remap clamp 后：<code>_uSV_Target0 = vec4(_uu_xlat16_21.x, _uu_xlat16_21.y, 0.0, 1.0); return;</code>（R=粗糙 G=金属）</td></tr>
+  <tr><td>看 AO/Fresnel 遮罩</td><td>LightTex 采样后：<code>_uSV_Target0 = vec4(vec3(_uu_xlat16_0.z), 1.0); return;</code></td></tr>
+  <tr><td>看 Glow 遮罩</td><td>同上位置：<code>_uSV_Target0 = vec4(vec3(_uu_xlat16_0.w), 1.0); return;</code></td></tr>
+  <tr><td>看 Matcap 采样</td><td>textureLod 后：<code>_uSV_Target0 = vec4(_uu_xlat16_5.xyz, 1.0); return;</code></td></tr>
+  <tr><td>隔离环境高光</td><td>合成行改为只保留 env 项（<code>_uu_xlat16_3.xyw</code> 通路），其余加项清零</td></tr>
+  <tr><td>隔离直接光</td><td>在 <code>_uu_xlat16_1.xyz = ((_uu_xlat16_2.xyz * vec3(_uu_xlat16_29)) + ...</code> 后插 <code>_uSV_Target0 = vec4(_uu_xlat16_2.xyz * vec3(_uu_xlat16_29), 1.0); return;</code></td></tr>
+  <tr><td>隔离 Fresnel 贡献</td><td>Fresnel 累加行后：<code>_uSV_Target0 = vec4(_uu_xlat16_21.xxx * _u_FresnelColor.xyz, 1.0); return;</code></td></tr>
+  <tr><td>隔离 Glow 贡献</td><td>⑥ 段：<code>_uSV_Target0 = vec4(_uu_xlat16_4.xzw, 1.0); return;</code></td></tr>
+  <tr><td>隔离 VS 加色</td><td>T3/T4 累加后对比注释掉两行直加（排查受击染色/Rim 异常）</td></tr>
+  <tr><td>跳过 Tonemap 看线性 HDR</td><td>末尾输出改为 <code>_uSV_Target0 = vec4(_uu_xlat16_0.xyz * 0.1, 1.0);</code>（×0.1 防过曝）</td></tr>
+  <tr><td>排查 HDR 分支</td><td>强制 <code>_uu_xlatb8 = true/false</code> 对比两条输出路径</td></tr>
+</table>
+<div class="warn">所有 <code>return;</code> 式可视化都会跳过后续计算（雾/曝光/tonemap），看到的是原始中间值——这正是目的；但要记得 alpha 恒为 1，不再带 PlayerId，后续依赖 alpha 的 pass 表现会失真，属预期现象。</div>
+
+<h2>6. 不改 shader 的观测手段</h2>
+<div class="formula">1) Texture Viewer 右键英雄像素 → Debug Pixel：逐指令看 _uvs_TEXCOORD7（雾因子）、
+   _uu_xlat16_21（粗糙/金属）、_uu_xlat16_0.z/w（AO/Glow 遮罩）等运行时值
+2) Pipeline State → FS → $Globals：22 个常量当前值整表查看
+   （重点：_ug_HeroFogColor / _ug_ExposureScale.w / _u_UseFullFresnel）
+3) Pipeline State → VS 64775 → $Globals：_ug_HeroFogIntensity / _ug_HeroFogParam（雾曲线源头）
+4) 三张纹理右键可单独查看通道（LightTex 建议逐通道看 x/y/z/w 四张遮罩图）
+5) 同 program 对照：EID 1652（8988 索引）与 EID 1745（666 索引）同 shader 不同网格，
+   改一次 FS 两者同时变化，可用于验证修改对不同体型英雄的一致性</div>
+
+</main>
+<footer>由 RenderDoc MCP（renderdoc）截帧分析生成 ｜ MAX-局外-真机截帧.rdc ｜ EID 1652 ｜ PS 64777 / VS 64775 ｜ 配套：《局外雾效调试分析.html》《英雄FS分析.html（局内版）》</footer>
+</body>
+</html>

@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>终末地·大地图 — GBuffer MRT 与通道语义分析 20260928</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --border:#30363d;
+    --fg:#e6edf3; --fg-dim:#8b949e; --accent:#58a6ff; --good:#3fb950;
+    --warn:#d29922; --bad:#f85149; --violet:#bc8cff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.65;padding:24px;max-width:1280px;margin:0 auto}
+  h1{font-size:26px;border-bottom:2px solid var(--good);padding-bottom:10px;margin-bottom:6px}
+  h2{font-size:20px;color:var(--accent);margin:34px 0 14px;border-left:4px solid var(--accent);padding-left:10px}
+  h3{font-size:16px;color:var(--violet);margin:20px 0 8px}
+  .meta{color:var(--fg-dim);font-size:13px;margin-bottom:24px}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+  th{background:var(--panel2);color:var(--accent);text-align:left;padding:8px 10px;border:1px solid var(--border)}
+  td{padding:6px 10px;border:1px solid var(--border);vertical-align:top}
+  tr:nth-child(even) td{background:rgba(255,255,255,0.02)}
+  code{background:#21262d;padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:12.5px;color:#ffa657}
+  pre{background:#0a0e14;border:1px solid var(--border);border-radius:8px;padding:12px 14px;overflow-x:auto;font-family:Consolas,monospace;font-size:12px;color:#c9d1d9;margin:10px 0;line-height:1.5}
+  pre b{color:#7ee2a8;font-weight:600}
+  .note{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--warn);border-radius:6px;padding:12px 16px;margin:14px 0;font-size:13.5px}
+  .note.green{border-left-color:var(--good)} .note.blue{border-left-color:var(--accent)} .note.violet{border-left-color:var(--violet)}
+  .evid{color:var(--fg-dim);font-size:12px}
+  ul{margin:8px 0 8px 22px} li{margin:4px 0}
+  .rtgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin:16px 0}
+  .rtcard{background:linear-gradient(180deg,#12261a,#161b22);border:1px solid #1f6f3f;border-radius:10px;padding:14px}
+  .rtcard h4{color:#7ee2a8;font-size:14px;margin-bottom:6px}
+  .rtcard .fmt{font-size:11px;color:var(--fg-dim);margin-bottom:8px}
+  .ch{display:grid;grid-template-columns:26px 1fr;gap:6px;font-size:12.5px;align-items:start}
+  .ch .c{background:#21262d;border:1px solid var(--border);border-radius:4px;text-align:center;font-family:Consolas,monospace;font-weight:700;color:var(--accent);padding:1px 0}
+  .ch .d{padding-top:1px}
+  .lane{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;margin:10px 0;font-size:12.5px;overflow-x:auto}
+  .att{display:inline-block;background:#21262d;border:1px solid var(--border);border-radius:6px;padding:3px 10px;margin:2px;font-family:Consolas,monospace;font-size:11.5px}
+  .att.w{border-color:#1f6f3f;color:#7ee2a8} .att.r{border-color:#8a4a1a;color:#ffb37e} .att.d{border-color:#8a6d1a;color:#ffd86e} .att.v{border-color:#5d3a8a;color:#d2b8ff}
+  .foot{margin-top:40px;padding-top:14px;border-top:1px solid var(--border);color:var(--fg-dim);font-size:12px}
+</style>
+</head>
+<body>
+
+<h1>《终末地》大地图 — GBuffer MRT 与通道语义分析</h1>
+<div class="meta">
+  截帧：<code>D:\Renderdoc 截帧\终末地\大地图.rdc</code> · Vulkan · RenderDoc MCP · 2026-09-28
+  · 系列报告：渲染流程总分析 / Subpass 深度分析（同目录）
+</div>
+
+<h2>1. 结论：是 MRT4，且按 Subpass 动态收窄</h2>
+<div class="note green">
+  <b>是。</b>GBuffer 阶段（大 RenderPass 的 Subpass 1/2）同时绑定 <b>4 个颜色附件 + 1 个 D24S8 深度</b>；随后按阶段收窄：Subpass 3（延迟光照）<b>只写 1 个 RT</b>，Subpass 4（水/特殊材质）<b>写 2 个 RT</b>。附件格式经 SPIR-V 反汇编与管线状态双重确认，通道语义全部来自着色器输出编码的逐条解读（见第 4 节），非猜测。
+</div>
+<table>
+<tr><th>Subpass</th><th>事件</th><th>写入目标</th><th>证据</th></tr>
+<tr><td>SP0 植被深度</td><td>E2621–E3126</td><td><span class="att d">126274 D24S8</span></td><td>E2629 outputs=[]</td></tr>
+<tr><td>SP1 主场景</td><td>E3127–E4562</td><td>绑 4+1，<b>PS 全零仅写 L0=0</b>（实质为 Early-Z 深度 pass）</td><td>E3133/E3138/E3180/E3195/E3204 五个 draw、三个不同 PS id 均为 <code>*Location(0) = {0,0,0,0}</code></td></tr>
+<tr><td>SP2 GBuffer 填充</td><td>E4563–E4599</td><td><span class="att w">L0 126758</span><span class="att w">L1 126262</span><span class="att w">L2 126279</span><span class="att w">L3 126282</span> + <span class="att d">Depth</span></td><td>E4567（全屏 resolve）与 E4573（植被）outputs 均为 4 RT</td></tr>
+<tr><td>SP3 延迟光照</td><td>E4600–E4636</td><td><b>仅 <span class="att w">L0 126758</span></b></td><td>E4604 outputs=[126758]；读 L2/L3+深度+阴影+LUT</td></tr>
+<tr><td>SP4 水/特殊材质</td><td>E4637–E4803</td><td><span class="att w">L0</span> + <span class="att w">L1 126262</span></td><td>E4643 outputs=[126758,126262]</td></tr>
+</table>
+<div class="note violet">
+  <b>架构修正（相对系列前两篇）：</b>SP1 的 ~330 个 draw 的像素着色器全部是"null PS"（只写 Location 0 全零）——SP1 实质是<b>纯深度 pass</b>（利用已绑定的 4RT FBO 与 EarlyFragmentTests）。真正的 GBuffer 材质填充发生在 <b>SP2 的首个全屏 draw（E4567）</b>：它读取 subpass 深度 input attachment 反投影重建世界坐标，经<b>虚拟纹理（VT）clipmap 页表解码</b>采样材质，一次性写满 4 个 MRT；后续 7 个植被/小物件 draw 增量覆盖。这是<b>延迟材质化（Deferred Material Resolve）</b>架构：几何 pass 只产深度，材质与着色数据全屏重建。
+</div>
+
+<h2>2. 四个 RT 一览</h2>
+<div class="rtgrid">
+  <div class="rtcard"><h4>RT0 / Location 0</h4>
+    <div class="fmt">ResourceId::126758 · 1842×1036 · 4B/px（推断 RGBA8）· SP2 写 / SP3 光照输出 / SP4 水覆盖</div>
+    <div class="ch"><div class="c">R</div><div class="d">HDR 颜色 R（SP2：基色基底；SP3：光照输出）</div></div>
+    <div class="ch"><div class="c">G</div><div class="d">HDR 颜色 G</div></div>
+    <div class="ch"><div class="c">B</div><div class="d">HDR 颜色 B</div></div>
+    <div class="ch"><div class="c">A</div><div class="d"><b>0.5 常量</b>（材质类标记/占位，两个着色器变体均硬编码 0.5）</div></div>
+  </div>
+  <div class="rtcard"><h4>RT1 / Location 1</h4>
+    <div class="fmt">ResourceId::126262 · 1842×1036 · 4B/px（推断 RGBA8）· SP2 写 / SP4 水写</div>
+    <div class="ch"><div class="c">R</div><div class="d">反射向量 X 编码：sqrt(|x|)·sign(x)·0.5+0.5</div></div>
+    <div class="ch"><div class="c">G</div><div class="d">反射向量 Y 编码（同上式）</div></div>
+    <div class="ch"><div class="c">B</div><div class="d">未写入（着色器不输出，值为 undefined）</div></div>
+    <div class="ch"><div class="c">A</div><div class="d">0 常量</div></div>
+  </div>
+  <div class="rtcard"><h4>RT2 / Location 2</h4>
+    <div class="fmt">ResourceId::126279 · <b>R8G8B8A8_UNORM</b>（管线状态确认）· SP2 写 → SP3 读</div>
+    <div class="ch"><div class="c">R</div><div class="d">八面体编码法线 X（oct.x·0.5+0.5）</div></div>
+    <div class="ch"><div class="c">G</div><div class="d">八面体编码法线 Y（oct.y·0.5+0.5）</div></div>
+    <div class="ch"><div class="c">B</div><div class="d">粗糙度 Roughness（含湿度衰减分支）</div></div>
+    <div class="ch"><div class="c">A</div><div class="d"><b>材质标志位打包</b>：((湿度等级&lt;&lt;4) | 材质ID) / 255</div></div>
+  </div>
+  <div class="rtcard"><h4>RT3 / Location 3</h4>
+    <div class="fmt">ResourceId::126282 · <b>R8G8B8A8_SRGB</b>（管线状态确认）· SP2 写 → SP3 读</div>
+    <div class="ch"><div class="c">R</div><div class="d">材质基色 R（SRGB，含反射/折射混合）</div></div>
+    <div class="ch"><div class="c">G</div><div class="d">材质基色 G</div></div>
+    <div class="ch"><div class="c">B</div><div class="d">材质基色 B</div></div>
+    <div class="ch"><div class="c">A</div><div class="d"><b>镜面强度编码</b>：(specular·127 | 0x80) / 255（高位为有效标志）</div></div>
+  </div>
+</div>
+<div class="lane">
+  <b>深度</b>：<span class="att d">ResourceId::126274 · D24S8 · 1842×1036</span> —— SP0–SP4 全程读写，SP3 经 input attachment 读取并反投影重建世界坐标。24bit 深度 + 8bit stencil。
+</div>
+
+<h2>3. 通道语义取证（SPIR-V 输出编码逐条解读）</h2>
+
+<h3>3.1 SP2 材质 resolve 着色器（E4567，PS 159061）的四个输出</h3>
+<pre>
+Output Location 0  *_5 = _1451   // float4(颜色, <b>0.5</b>)  —— A 通道硬编码 0.5
+Output Location 1  *_8 = _320    // (sqrt 编码反射向量.xy, 未定义, 0)
+Output Location 2  *_6 = _1464   // (octNormal.xy*0.5+0.5, roughness, 材质标志/255)
+Output Location 3  *_7 = _1469   // (最终材质色.xyz, (specular*127|128)/255)
+
+// —— Location 1 编码细节（反射向量）——
+_1440 = reflectOffset（反射方向 - 视线方向, y 取反）
+_1447 = sqrt(abs(_1440)) * sign(_1440)        // 平方根符号编码（压缩半球分布）
+*_8  = float4(_1447 * 0.5 + 0.5, Undef, 0)
+
+// —— Location 2 编码细节（八面体法线 + 材质位打包）——
+_289 = abs(N); _290 = |Nx|+|Ny|+|Nz|
+_293 = N.xz / _290                             // 八面体投影
+if (N.y <= 0) { 折叠到下半球（octahedral wrap） }
+_1457 = octN.xy * 0.5 + 0.5                    // 映射到 [0,1]
+_1463 = ((湿度*15) &lt;&lt; 4 + 材质ID) * 0.0039      // A 通道：8bit = 4bit 湿度 + 4bit ID
+
+// —— Location 3 编码细节（SRGB 基色 + specular 打包）——
+_306 = specular * 127; _307 = uint(_306) | 128 // 最高位=有效标志
+_1468 = _307 * 0.0039                          // A 通道 7bit 精度镜面强度
+</pre>
+<p class="evid">同族变体 E4573（植被 draw，PS 159074）输出结构完全一致：L0=(色,0.5)、L1=(sqrt 编码,·,0)、L2=(oct 法线, 粗糙度, smoothstep 深度因子变体)、L3=(色, 深度因子变体)——证明这是引擎统一的 GBuffer 打包规范，非单着色器偶然。</p>
+
+<h3>3.2 SP3 光照着色器的消费方式（闭环验证）</h3>
+<pre>
+E4604（SP3 光照全屏 draw，outputs = 仅 RT0 126758）读取：
+  res20 = <b>126279 (RT2, RGBA8_UNORM)</b>  → 解码八面体法线 + 粗糙度 + 材质标志
+  res18 = <b>126282 (RT3, RGBA8_SRGB)</b>  → 取基色 + specular
+  res19 = <b>126274 (深度)</b>             → 重建线性深度
+  + CSM×2 (2048² D16) + 点光阴影 (512² D32) + 3D LUT (32³ R8) + cookie (1024²)
+光照结果写入 RT0（唯一输出）
+</pre>
+<div class="note blue">
+  <b>格式选择的工程含义</b>：RT2 用 UNORM（法线/粗糙度是线性数据，SRGB 会破坏插值）；RT3 用 SRGB（基色是感知空间数据，硬件免费做 gamma）；RT0/RT1 承担 HDR 输出但仍是 4B/px 的 LDR 类格式（推断 RGBA8）——HDR 范围依赖后续 Karis 亮部提取（Bloom 链）的软阈值处理，这是移动端省带宽的典型取舍（对照桌面端常用的 RGBA16F GBuffer）。
+</div>
+
+<h2>4. 数据流总图</h2>
+<div class="lane">
+<b>SP0/SP1（纯深度）</b>：119+330 Draw → <span class="att d">126274 深度</span>（PS 为 null，Early-Z 专用管线）<br><br>
+<b>SP2（GBuffer 填充，E4567 全屏 resolve + 7 植被 draw）</b>：<br>
+&nbsp;&nbsp;读：深度 input attachment（subpassLoad）→ 反投影世界坐标 → <span class="att v">VT clipmap 页表（位域解包 64×uint4）</span> → 2DArray 材质贴图（grad 采样）→ <span class="att v">64 灯 cluster 位域（1024×uint4）+ 灯数据 7168B</span><br>
+&nbsp;&nbsp;写：<span class="att w">RT0 (色,0.5)</span> <span class="att w">RT1 (反射向量)</span> <span class="att w">RT2 (oct 法线+粗糙度+材质位)</span> <span class="att w">RT3 (SRGB 基色+specular)</span> ＋ <span class="att v">VT 页请求反馈 SSBO（可见性回写 CPU）</span><br><br>
+<b>SP3（延迟光照，9 全屏）</b>：读 RT2+RT3+深度+阴影+LUT → 写 <span class="att w">RT0</span>（HDR 光照输出）<br><br>
+<b>SP4（水/特殊材质，38 Draw）</b>：写 <span class="att w">RT0</span> + <span class="att w">RT1</span><br><br>
+<b>RenderPass 结束（E4803，C=Store DS=Store）</b> → 透明层 → Bloom（读 RT0 派生）→ 合成
+</div>
+
+<h2>5. 附加发现</h2>
+<ul>
+  <li><b>虚拟纹理（Virtual Texture）实锤</b>：E4567 PS 中存在完整的 clipmap 页表解码——从 <code>uniforms24._child0[64]×uint4</code>（17456B 常量块）按位提取页 ID/偏移（&gt;&gt;20 &amp; 1023、&amp; 31 等位段），并以 <code>Grad()</code> 显式梯度采样 2DArray 物理页；同时向 <b>SSBO（DescriptorSet 3 Binding 26）写入打包的页请求</b>（(页ID&lt;&lt;24) | (tileY&lt;&lt;16) | (tileX&lt;&lt;8) 格式）——这是 VT 可见性反馈回传，引擎在移动端跑标准 VT 流水线。</li>
+  <li><b>Cluster 灯光</b>：1024×uint4 位域标记 64 簇×灯光列表，配合 7168B 灯数据块（64 灯 × 颜色/位置/衰减/阴影参数）在 PS 内按位解包——移动端 forward+ 式 cluster lighting 在延迟材质阶段即完成光列表查询。</li>
+  <li><b>湿度系统</b>：RT2.A 的高 4bit 是湿度等级（wetness），着色器中有 <code>湿度→粗糙度衰减</code>、<code>湿度→镜面增强</code>、<code>smoothstep 高度衰减</code> 三条联动分支——大地图雨后湿地/水坑表现的数据基础。</li>
+  <li><b>材质 ID</b>：RT2.A 低 4bit 材质 ID，着色器内出现 <code>id*255 == 19</code>/<code>== 15</code> 的特判（鞋印/水花类 SFX 分支）。</li>
+</ul>
+
+<h2>6. 数据来源</h2>
+<ul>
+  <li>输出目标：get_draw_call_details @ E2629（SP0 仅深度）/ E3204·E4567·E4573（4 MRT）/ E4604（仅 RT0）/ E4643（RT0+RT1）</li>
+  <li>SP1 null PS：get_shader_info(pixel) @ E3133/E3138/E3180/E3195/E3204 —— PS 132516/132519/132521 三 id 均为 <code>Location(0)={0,0,0,0}</code></li>
+  <li>GBuffer 编码：get_shader_info(pixel) @ E4567（PS 159061，1470 id 完整反汇编）与 E4573（PS 159074，1201 id）</li>
+  <li>SP3 消费与格式：get_pipeline_state @ E4604（res18=126282 SRGB / res20=126279 UNORM / 深度 126274）；E4567/E4573 管线状态确认 126279=RGBA8_UNORM、126282=RGBA8_SRGB</li>
+  <li>subpass 边界：E2621 Begin / E3127·E4563·E4600·E4637 NextSubpass⇒1–4 / E4803 End（详见系列前篇《Subpass 深度分析》）</li>
+</ul>
+<p class="evid">注：RT0(126758)/RT1(126262) 的像素格式未在本帧绑定中直接暴露（无后续采样点），按 4B/px 与用途推断为 RGBA8 类；其余结论均有 SPIR-V/管线状态直接证据。</p>
+
+<div class="foot">
+  <p>GBuffer MRT 与通道语义分析 · 2026-09-28 · qrenderdoc(官方) + renderdoc MCP · 自包含 HTML</p>
+  <p>系列报告：渲染流程总分析 → Subpass 深度分析 → 本篇（GBuffer 通道）</p>
+</div>
+
+</body>
+</html>
