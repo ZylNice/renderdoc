@@ -104,41 +104,15 @@ class CaptureManager:
             raise ValueError("Invalid file type. Expected .rdc file: %s" % capture_path)
 
         # ctx.LoadCapture() performs Qt UI work and must run on the UI thread.
-        # When the IPC poll loop runs on a worker thread (builds without PySide2),
-        # defer the actual load to a UI-thread menu callback instead of calling
-        # it here (calling it off-thread crashes the application).
+        # The IPC poll loop runs on a worker thread, so marshal the load onto the
+        # UI thread via CaptureContext.DelayedCallback - its Python invoker wraps
+        # the call in GUIInvoke::call (see PythonInvokers.cpp), so the callback is
+        # executed on the UI thread. Only if that is unavailable do we fall back to
+        # the manual 'Tools > MCP Bridge > Open Pending Capture' menu callback.
         if threading.current_thread() is not threading.main_thread():
-            self._pending_open = capture_path
-            return {
-                "success": False,
-                "deferred": True,
-                "capture_path": capture_path,
-                "message": (
-                    "Capture open deferred: LoadCapture must run on the UI thread. "
-                    "In the RenderDoc UI, click 'Tools > MCP Bridge > Open Pending "
-                    "Capture' to complete opening this capture."
-                ),
-            }
+            return self._open_via_ui_thread(capture_path)
 
-        # Create ReplayOptions with defaults
-        opts = rd.ReplayOptions()
-
-        # Open the capture
-        # LoadCapture will automatically close any existing capture
-        try:
-            self.ctx.LoadCapture(
-                capture_path,   # captureFile
-                opts,           # ReplayOptions
-                capture_path,   # origFilename (same as capture path)
-                False,          # temporary (False = permanent load)
-                True,           # local (True = local file)
-            )
-        except Exception as e:
-            raise ValueError("Failed to open capture: %s" % str(e))
-
-        # Verify the capture was loaded
-        if not self.ctx.IsCaptureLoaded():
-            raise ValueError("Failed to load capture (unknown error)")
+        self._load_capture(capture_path)
 
         # Get capture info
         result = {
@@ -165,6 +139,55 @@ class CaptureManager:
             pass
 
         return result
+
+    def _load_capture(self, capture_path):
+        """Actually call ctx.LoadCapture(). MUST run on the UI thread."""
+        # Create ReplayOptions with defaults
+        opts = rd.ReplayOptions()
+
+        # Open the capture
+        # LoadCapture will automatically close any existing capture
+        try:
+            self.ctx.LoadCapture(
+                capture_path,   # captureFile
+                opts,           # ReplayOptions
+                capture_path,   # origFilename (same as capture path)
+                False,          # temporary (False = permanent load)
+                True,           # local (True = local file)
+            )
+        except Exception as e:
+            raise ValueError("Failed to open capture: %s" % str(e))
+
+        # Verify the capture was loaded
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("Failed to load capture (unknown error)")
+
+    def _open_via_ui_thread(self, capture_path):
+        """
+        We are on the IPC worker thread, so we cannot call ctx.LoadCapture().
+
+        Note: CaptureContext.DelayedCallback() does marshal to the UI thread on
+        paper (PythonInvokers.cpp wraps it in GUIInvoke::call), but in practice the
+        callback is never delivered in this build - verified by watching CPU/RAM
+        stay flat after the call. Do not re-add that approach without verifying
+        that the callback actually fires.
+
+        The reliable alternatives are:
+          * start qrendertest with the .rdc path as a command line argument, or
+          * defer to the 'Tools > MCP Bridge > Open Pending Capture' menu item.
+        """
+        self._pending_open = capture_path
+        return {
+            "success": False,
+            "deferred": True,
+            "capture_path": capture_path,
+            "message": (
+                "Capture open deferred: LoadCapture must run on the UI thread. "
+                "Either restart qrendertest with the .rdc path as a command line "
+                "argument, or in the RenderDoc UI click 'Tools > MCP Bridge > Open "
+                "Pending Capture' to complete opening this capture."
+            ),
+        }
 
     def has_pending_open(self):
         """Check whether a deferred open_capture request is pending"""

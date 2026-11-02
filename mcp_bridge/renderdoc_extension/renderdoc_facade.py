@@ -10,6 +10,7 @@ from .services import (
     SearchService,
     ResourceService,
     PipelineService,
+    ExportService,
 )
 
 
@@ -40,6 +41,7 @@ class RenderDocFacade:
         self._search = SearchService(ctx, self._invoke)
         self._resource = ResourceService(ctx, self._invoke)
         self._pipeline = PipelineService(ctx, self._invoke)
+        self._export = ExportService(ctx, self._invoke)
 
     def _invoke(self, callback):
         """Invoke callback on replay thread via BlockInvoke"""
@@ -132,6 +134,65 @@ class RenderDocFacade:
         """Get shader information for a specific stage"""
         return self._pipeline.get_shader_info(event_id, stage)
 
+    def get_shader_source(self, event_id, stage):
+        """Get editable shader source (decompiled GLSL) for a stage"""
+        return self._pipeline.get_shader_source(event_id, stage)
+
+    def apply_shader_replacement(self, event_id, stage, source):
+        """Compile source and replace the shader bound at an event"""
+        return self._pipeline.apply_shader_replacement(event_id, stage, source)
+
+    def remove_shader_replacement(self, event_id, stage):
+        """Remove the replacement of the shader bound at an event"""
+        return self._pipeline.remove_shader_replacement(event_id, stage)
+
     def get_pipeline_state(self, event_id):
         """Get full pipeline state at an event"""
         return self._pipeline.get_pipeline_state(event_id)
+
+    # ==================== Frame Export ====================
+
+    def list_meshes(self, marker_filter='', eid_min=0, eid_max=1 << 30,
+                    min_indices=0, offset=0, limit=50):
+        """List exportable draw calls (paginated)"""
+        return self._export.list_meshes(marker_filter, eid_min, eid_max,
+                                        min_indices, offset, limit)
+
+    def export_mesh(self, eid, out_dir=None, stage='auto'):
+        """Export one draw call's mesh to a .glb + manifest entry"""
+        return self._export.export_mesh(eid, out_dir, stage)
+
+    def export_material(self, eid, out_dir=None):
+        """Export the material (textures + params) bound at a draw call"""
+        return self._export.export_material(eid, out_dir)
+
+    def export_frame(self, out_dir=None, marker_filter='', eid_min=0,
+                     eid_max=1 << 30, min_indices=3, stage='auto',
+                     materials=True, limit=10000, fresh=False,
+                     exclude_filter=''):
+        """Batch export meshes (+unique materials) for a set of draw calls"""
+        return self._export.export_frame(out_dir, marker_filter, eid_min,
+                                         eid_max, min_indices, stage,
+                                         materials, limit, fresh,
+                                         exclude_filter)
+
+    def build_scene(self, out_dir=None, blender_path=None, make_blend=True):
+        """Assemble exported meshes/materials into a .blend via Blender"""
+        return self._export.build_scene(out_dir, blender_path, make_blend)
+
+    def preview_scene(self, blend=None, png=None, hide='', camera=None,
+                      blender_path=None):
+        """Render a preview PNG of an assembled .blend via headless Blender"""
+        return self._export.preview_scene(blend, png, hide, camera,
+                                          blender_path)
+
+    def save_frame_image(self, eid, out_path=None):
+        """Save the current output target (RT0) at an event to a PNG"""
+        return self._export.save_frame_image(eid, out_path)
+
+    def verify_transforms(self, marker_filter='', eid_min=0, eid_max=1 << 30,
+                          min_indices=3, limit=1000, exclude_filter=''):
+        """Cross-check M*obj vs inv(VP)*clip per draw call"""
+        return self._export.verify_transforms(marker_filter, eid_min, eid_max,
+                                              min_indices, limit,
+                                              exclude_filter)

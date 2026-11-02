@@ -1,7 +1,7 @@
 [project]
-name = "renderdoc-mcp"
+name = "rendertest-mcp"
 version = "1.0.0"
-description = "MCP server for RenderDoc graphics debugging"
+description = "MCP server for Rendertest (modified RenderDoc) graphics debugging"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-renderdoc-mcp = "mcp_server.server:main"
+rendertest-mcp = "mcp_server.server:main"
 
 [build-system]
 requires = ["hatchling"]

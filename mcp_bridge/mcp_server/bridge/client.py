@@ -12,7 +12,10 @@ from typing import Any
 
 
 # IPC directory (must match renderdoc_extension/socket_server.py)
-IPC_DIR = os.path.join(tempfile.gettempdir(), "renderdoc_mcp")
+# Uses a dedicated directory so it can run in parallel with a normal renderdoc-mcp instance
+IPC_DIR = os.environ.get(
+    "RENDERTEST_MCP_IPC_DIR", os.path.join(tempfile.gettempdir(), "rendertest_mcp")
+)
 REQUEST_FILE = os.path.join(IPC_DIR, "request.json")
 RESPONSE_FILE = os.path.join(IPC_DIR, "response.json")
 LOCK_FILE = os.path.join(IPC_DIR, "lock")
@@ -38,8 +41,8 @@ class RenderDocBridge:
         # Check if IPC directory exists
         if not os.path.exists(IPC_DIR):
             raise RenderDocBridgeError(
-                f"Cannot connect to RenderDoc MCP Bridge at {self.host}:{self.port}. "
-                "Make sure RenderDoc is running with the MCP Bridge extension loaded."
+                f"Cannot connect to Rendertest MCP Bridge at {self.host}:{self.port}. "
+                "Make sure qrendertest is running with the MCP Bridge extension loaded."
             )
 
         request = {

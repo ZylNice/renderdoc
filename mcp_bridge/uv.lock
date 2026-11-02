@@ -1315,7 +1315,7 @@ wheels = [
 ]
 
 [[package]]
-name = "renderdoc-mcp"
+name = "rendertest-mcp"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [

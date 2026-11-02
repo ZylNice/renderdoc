@@ -14,8 +14,10 @@ import time
 import traceback
 
 
-# IPC directory
-IPC_DIR = os.path.join(tempfile.gettempdir(), "renderdoc_mcp")
+# IPC directory (dedicated to rendertest so a normal renderdoc-mcp can run in parallel)
+IPC_DIR = os.environ.get(
+    "RENDERTEST_MCP_IPC_DIR", os.path.join(tempfile.gettempdir(), "rendertest_mcp")
+)
 REQUEST_FILE = os.path.join(IPC_DIR, "request.json")
 RESPONSE_FILE = os.path.join(IPC_DIR, "response.json")
 LOCK_FILE = os.path.join(IPC_DIR, "lock")

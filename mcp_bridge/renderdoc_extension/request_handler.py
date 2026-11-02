@@ -22,12 +22,23 @@ class RequestHandler:
             "get_draw_call_details": self._handle_get_draw_call_details,
             "get_action_timings": self._handle_get_action_timings,
             "get_shader_info": self._handle_get_shader_info,
+            "get_shader_source": self._handle_get_shader_source,
+            "apply_shader_replacement": self._handle_apply_shader_replacement,
+            "remove_shader_replacement": self._handle_remove_shader_replacement,
             "get_buffer_contents": self._handle_get_buffer_contents,
             "get_texture_info": self._handle_get_texture_info,
             "get_texture_data": self._handle_get_texture_data,
             "get_pipeline_state": self._handle_get_pipeline_state,
             "list_captures": self._handle_list_captures,
             "open_capture": self._handle_open_capture,
+            "list_meshes": self._handle_list_meshes,
+            "export_mesh": self._handle_export_mesh,
+            "export_material": self._handle_export_material,
+            "export_frame": self._handle_export_frame,
+            "build_scene": self._handle_build_scene,
+            "preview_scene": self._handle_preview_scene,
+            "save_frame_image": self._handle_save_frame_image,
+            "verify_transforms": self._handle_verify_transforms,
         }
 
     def handle(self, request):
@@ -136,6 +147,39 @@ class RequestHandler:
             raise ValueError("stage is required")
         return self.facade.get_shader_info(int(event_id), stage)
 
+    def _handle_get_shader_source(self, params):
+        """Handle get_shader_source request"""
+        event_id = params.get("event_id")
+        stage = params.get("stage")
+        if event_id is None:
+            raise ValueError("event_id is required")
+        if stage is None:
+            raise ValueError("stage is required")
+        return self.facade.get_shader_source(int(event_id), stage)
+
+    def _handle_apply_shader_replacement(self, params):
+        """Handle apply_shader_replacement request"""
+        event_id = params.get("event_id")
+        stage = params.get("stage")
+        source = params.get("source")
+        if event_id is None:
+            raise ValueError("event_id is required")
+        if stage is None:
+            raise ValueError("stage is required")
+        if source is None:
+            raise ValueError("source is required")
+        return self.facade.apply_shader_replacement(int(event_id), stage, source)
+
+    def _handle_remove_shader_replacement(self, params):
+        """Handle remove_shader_replacement request"""
+        event_id = params.get("event_id")
+        stage = params.get("stage")
+        if event_id is None:
+            raise ValueError("event_id is required")
+        if stage is None:
+            raise ValueError("stage is required")
+        return self.facade.remove_shader_replacement(int(event_id), stage)
+
     def _handle_get_buffer_contents(self, params):
         """Handle get_buffer_contents request"""
         resource_id = params.get("resource_id")
@@ -183,3 +227,82 @@ class RequestHandler:
         if capture_path is None:
             raise ValueError("capture_path is required")
         return self.facade.open_capture(capture_path)
+
+    def _handle_list_meshes(self, params):
+        """Handle list_meshes request"""
+        return self.facade.list_meshes(
+            params.get("marker_filter", ""),
+            int(params.get("eid_min", 0)),
+            int(params.get("eid_max", 1 << 30)),
+            int(params.get("min_indices", 0)),
+            int(params.get("offset", 0)),
+            int(params.get("limit", 50)),
+        )
+
+    def _handle_export_mesh(self, params):
+        """Handle export_mesh request"""
+        event_id = params.get("event_id")
+        if event_id is None:
+            raise ValueError("event_id is required")
+        return self.facade.export_mesh(
+            int(event_id), params.get("out_dir"), params.get("stage", "auto")
+        )
+
+    def _handle_export_material(self, params):
+        """Handle export_material request"""
+        event_id = params.get("event_id")
+        if event_id is None:
+            raise ValueError("event_id is required")
+        return self.facade.export_material(int(event_id), params.get("out_dir"))
+
+    def _handle_export_frame(self, params):
+        """Handle export_frame request"""
+        return self.facade.export_frame(
+            params.get("out_dir"),
+            params.get("marker_filter", ""),
+            int(params.get("eid_min", 0)),
+            int(params.get("eid_max", 1 << 30)),
+            int(params.get("min_indices", 3)),
+            params.get("stage", "auto"),
+            bool(params.get("materials", True)),
+            int(params.get("limit", 10000)),
+            bool(params.get("fresh", False)),
+            params.get("exclude_filter", ""),
+        )
+
+    def _handle_build_scene(self, params):
+        """Handle build_scene request"""
+        return self.facade.build_scene(
+            params.get("out_dir"),
+            params.get("blender_path"),
+            bool(params.get("make_blend", True)),
+        )
+
+    def _handle_preview_scene(self, params):
+        """Handle preview_scene request"""
+        return self.facade.preview_scene(
+            params.get("blend"),
+            params.get("png"),
+            params.get("hide", ""),
+            params.get("camera"),
+            params.get("blender_path"),
+        )
+
+    def _handle_save_frame_image(self, params):
+        """Handle save_frame_image request"""
+        event_id = params.get("event_id")
+        if event_id is None:
+            raise ValueError("event_id is required")
+        return self.facade.save_frame_image(int(event_id),
+                                            params.get("out_path"))
+
+    def _handle_verify_transforms(self, params):
+        """Handle verify_transforms request"""
+        return self.facade.verify_transforms(
+            params.get("marker_filter", ""),
+            int(params.get("eid_min", 0)),
+            int(params.get("eid_max", 1 << 30)),
+            int(params.get("min_indices", 3)),
+            int(params.get("limit", 1000)),
+            params.get("exclude_filter", ""),
+        )

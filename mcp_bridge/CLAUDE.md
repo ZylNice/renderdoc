@@ -1,4 +1,4 @@
-# RenderDoc MCP Server
+# Rendertest MCP Server
 
 RenderDoc UI拡張機能として動作するMCPサーバー。AIアシスタントがRenderDocのキャプチャデータにアクセスし、DirectX 11/12のグラフィックスデバッグを支援する。
 
@@ -11,7 +11,7 @@ Claude/AI Client (stdio)
         │
         ▼
 MCP Server Process (標準Python + FastMCP 2.0)
-        │ File-based IPC (%TEMP%/renderdoc_mcp/)
+        │ File-based IPC (%TEMP%/rendertest_mcp/, 可用 RENDERTEST_MCP_IPC_DIR 覆盖)
         ▼
 RenderDoc Process (Extension + File Polling)
 ```

@@ -67,6 +67,168 @@ class PipelineService:
             raise ValueError(result["error"])
         return result["shader"]
 
+    # ==================== Shader Editing ====================
+
+    def get_shader_source(self, event_id, stage):
+        """Get editable shader source (decompiled GLSL) for a stage at an event"""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"source": None, "error": None}
+
+        def callback(controller):
+            controller.SetFrameEvent(event_id, False)
+
+            pipe = controller.GetPipelineState()
+            stage_enum = Parsers.parse_stage(stage)
+
+            shader = pipe.GetShader(stage_enum)
+            if shader == rd.ResourceId.Null():
+                result["error"] = "No %s shader bound at event %d" % (stage, event_id)
+                return
+
+            reflection = pipe.GetShaderReflection(stage_enum)
+            if not reflection:
+                result["error"] = "No shader reflection available"
+                return
+
+            info = {
+                "event_id": event_id,
+                "stage": stage,
+                "resource_id": str(shader),
+                "entry_point": pipe.GetShaderEntryPoint(stage_enum),
+                "pipeline": str(pipe.GetGraphicsPipelineObject()),
+            }
+
+            targets = controller.GetDisassemblyTargets(True)
+            if not targets:
+                result["error"] = "No disassembly targets available"
+                return
+            info["disassembly_target"] = targets[0]
+            info["source"] = controller.DisassembleShader(
+                pipe.GetGraphicsPipelineObject(), reflection, targets[0]
+            )
+
+            try:
+                info["target_encodings"] = [
+                    str(e) for e in controller.GetTargetShaderEncodings()
+                ]
+            except Exception:
+                pass
+
+            result["source"] = info
+
+        self._invoke(callback)
+
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["source"]
+
+    def apply_shader_replacement(self, event_id, stage, source):
+        """Compile source and replace the shader bound at an event, then re-replay"""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+        if not source:
+            raise ValueError("source is required")
+
+        result = {"error": None}
+
+        def callback(controller):
+            controller.SetFrameEvent(event_id, False)
+
+            pipe = controller.GetPipelineState()
+            stage_enum = Parsers.parse_stage(stage)
+
+            shader = pipe.GetShader(stage_enum)
+            if shader == rd.ResourceId.Null():
+                result["error"] = "No %s shader bound at event %d" % (stage, event_id)
+                return
+
+            reflection = pipe.GetShaderReflection(stage_enum)
+            if not reflection:
+                result["error"] = "No shader reflection available"
+                return
+
+            entry = pipe.GetShaderEntryPoint(stage_enum)
+
+            # Prefer GLSL source encoding, fall back to whatever the driver accepts
+            encoding = rd.ShaderEncoding.GLSL
+            try:
+                encodings = list(controller.GetTargetShaderEncodings())
+                if encodings and rd.ShaderEncoding.GLSL not in encodings:
+                    encoding = encodings[0]
+                result["available_encodings"] = [str(e) for e in encodings]
+            except Exception:
+                pass
+
+            new_shader, errors = controller.BuildTargetShader(
+                entry,
+                encoding,
+                source.encode("utf-8"),
+                rd.ShaderCompileFlags(),
+                stage_enum,
+            )
+
+            if errors:
+                result["error"] = "compile failed"
+                result["compile_errors"] = errors
+                return
+
+            controller.ReplaceResource(shader, new_shader)
+            # Force re-replay so the replacement takes effect immediately
+            controller.SetFrameEvent(event_id, True)
+
+            result.update(
+                {
+                    "success": True,
+                    "event_id": event_id,
+                    "stage": stage,
+                    "original_shader": str(shader),
+                    "replacement_shader": str(new_shader),
+                    "entry_point": entry,
+                    "encoding": str(encoding),
+                }
+            )
+
+        self._invoke(callback)
+        return result
+
+    def remove_shader_replacement(self, event_id, stage):
+        """Remove the replacement of the shader bound at an event, then re-replay"""
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"error": None}
+
+        def callback(controller):
+            controller.SetFrameEvent(event_id, False)
+
+            pipe = controller.GetPipelineState()
+            stage_enum = Parsers.parse_stage(stage)
+
+            shader = pipe.GetShader(stage_enum)
+            if shader == rd.ResourceId.Null():
+                result["error"] = "No %s shader bound at event %d" % (stage, event_id)
+                return
+
+            controller.RemoveReplacement(shader)
+            controller.SetFrameEvent(event_id, True)
+
+            result.update(
+                {
+                    "success": True,
+                    "event_id": event_id,
+                    "stage": stage,
+                    "restored_shader": str(shader),
+                }
+            )
+
+        self._invoke(callback)
+
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result
+
     def get_pipeline_state(self, event_id):
         """Get full pipeline state at an event"""
         if not self.ctx.IsCaptureLoaded():
