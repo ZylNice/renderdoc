@@ -1,0 +1,10 @@
+*.local.*
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+dist/
+build/
+*.egg-info/
+PROGRESS.md
