@@ -24,6 +24,7 @@ qrenderdoc/Makefile*
 bin
 obj/
 .obj/
+*.obj
 *.opensdf
 *.VC.*db
 .vs/
