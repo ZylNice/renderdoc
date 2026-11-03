@@ -309,14 +309,19 @@ struct CachedHookData
         return;
     }
 
-    // increment the module reference count, so it doesn't disappear while we're processing it
-    // there's a very small race condition here between if GetModuleFileName returns, the module is
-    // unloaded then we load it again. The only way around that is inserting very scary locks
-    // between here
-    // and FreeLibrary that I want to avoid. Worst case, we load a dll, hook it, then unload it
-    // again.
-    HMODULE refcountModHandle = LoadLibraryW(modpath);
-    RDCASSERTEQUAL(refcountModHandle, module);
+    // Hold the exact loaded image while processing its imports. Loading its filename again can
+    // resolve to a different image when the process has multiple copies of a DLL or uses loader
+    // redirection (e.g. a managed launcher), and can run unrelated DLL initialisation recursively.
+    HMODULE refcountModHandle = NULL;
+    if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)module,
+                          &refcountModHandle))
+      return;
+
+    if(refcountModHandle != module)
+    {
+      FreeLibrary(refcountModHandle);
+      return;
+    }
     byte *baseAddress = (byte *)refcountModHandle;
 
     PIMAGE_DOS_HEADER dosheader = (PIMAGE_DOS_HEADER)baseAddress;

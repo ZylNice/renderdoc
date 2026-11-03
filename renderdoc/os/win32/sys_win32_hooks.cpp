@@ -423,8 +423,11 @@ private:
       *lpProcessInformation = dummy;
     }
 
-    bool resume = (dwCreationFlags & CREATE_SUSPENDED) == 0;
-    dwCreationFlags |= CREATE_SUSPENDED;
+    // Only suspend children that will actually be injected. Browser/sandbox helpers that are
+    // excluded from capture must retain the caller's original process creation semantics.
+    bool resume = inject && (dwCreationFlags & CREATE_SUSPENDED) == 0;
+    if(inject)
+      dwCreationFlags |= CREATE_SUSPENDED;
 
     rdcstr envA;
     std::wstring envW;
@@ -490,7 +493,7 @@ private:
       env = (void *)envA.data();
     }
 
-    RDCLOG("Process diagnostics: calling real %s with forced flags=0x%08x, resume=%u, inject=%u",
+    RDCLOG("Process diagnostics: calling real %s with flags=0x%08x, resume=%u, inject=%u",
            entryPoint, dwCreationFlags, resume ? 1U : 0U, inject ? 1U : 0U);
     BOOL ret = realFunc(dwCreationFlags, env, lpProcessInformation);
     RDCLOG("Process diagnostics: real %s returned %u, error=%lu, pid=%lu, process=%p, thread=%p",
@@ -566,6 +569,9 @@ private:
         "epicwebhelper.exe",
         "ntebrowser.exe",
         "ntewebbooster.exe",
+        // WebView2 hosts the Wuthering Waves launcher's UI. Injecting its browser/renderer
+        // children breaks sandboxed process startup and causes an endless respawn loop.
+        "msedgewebview2.exe",
         // NVIDIA NGX/DLSS updater utility - games spawn it repeatedly during startup, and
         // injecting it makes the spawn fail and get retried forever (game never finishes
         // booting, white screen). It's a utility, never a capture target.
@@ -600,6 +606,7 @@ private:
       }
       else if(IsUtilityProcess(app))
       {
+        RDCLOG("Process diagnostics: skipping capture for utility child %s", app.c_str());
         inject = false;
       }
     }
@@ -613,6 +620,7 @@ private:
       }
       else if(IsUtilityProcess(cmd))
       {
+        RDCLOG("Process diagnostics: skipping capture for utility child command %s", cmd.c_str());
         inject = false;
       }
     }
