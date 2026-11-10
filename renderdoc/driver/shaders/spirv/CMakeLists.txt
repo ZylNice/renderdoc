@@ -154,4 +154,8 @@ endif()
 
 add_library(rdoc_spirv OBJECT ${sources})
 target_compile_definitions(rdoc_spirv ${RDOC_DEFINITIONS})
+if(MSVC)
+    set_property(SOURCE ${glslang_dir}/glslang/MachineIndependent/ShaderLang.cpp
+        APPEND PROPERTY COMPILE_DEFINITIONS _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+endif()
 target_include_directories(rdoc_spirv ${RDOC_INCLUDES} ${glslang_dir})

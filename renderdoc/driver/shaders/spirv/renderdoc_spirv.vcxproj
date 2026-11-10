@@ -121,7 +121,9 @@
     <ClCompile Include="..\..\..\3rdparty\glslang\glslang\MachineIndependent\reflection.cpp" />
     <ClCompile Include="..\..\..\3rdparty\glslang\glslang\MachineIndependent\RemoveTree.cpp" />
     <ClCompile Include="..\..\..\3rdparty\glslang\glslang\MachineIndependent\Scan.cpp" />
-    <ClCompile Include="..\..\..\3rdparty\glslang\glslang\MachineIndependent\ShaderLang.cpp" />
+    <ClCompile Include="..\..\..\3rdparty\glslang\glslang\MachineIndependent\ShaderLang.cpp">
+      <PreprocessorDefinitions>_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
     <ClCompile Include="..\..\..\3rdparty\glslang\glslang\MachineIndependent\SpirvIntrinsics.cpp" />
     <ClCompile Include="..\..\..\3rdparty\glslang\glslang\MachineIndependent\SymbolTable.cpp" />
     <ClCompile Include="..\..\..\3rdparty\glslang\glslang\MachineIndependent\Versions.cpp" />

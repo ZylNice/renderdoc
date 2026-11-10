@@ -268,15 +268,6 @@ public:
 private:
   static DXGIHook dxgihooks;
 
-  static bool InlineActive()
-  {
-#if defined(_WIN64)
-    return s_InlineHooksInstalled;
-#else
-    return false;
-#endif
-  }
-
   // Some games (notably those with anti-cheat/anti-debug protection) resolve
   // CreateDXGIFactory1/2 via their own export-walking code and call the raw function pointer
   // directly, bypassing the IAT hooks. The game then gets a REAL IDXGIFactory while the D3D12
@@ -316,10 +307,6 @@ private:
            (void *)s_TrampCreateFactory2);
   }
 
-  // The inline detours call the real dxgi.dll implementation via the saved trampoline, then wrap.
-  // We must NOT route through the IAT-hooked function pointers (CreateDXGIFactory() etc) because
-  // those resolve back to our IAT hook / this detour and would recurse or double-wrap. The IAT
-  // hooks below skip their own wrapping whenever the inline hook is active.
   static HRESULT WINAPI CreateDXGIFactory_inline(REFIID riid, void **ppFactory)
   {
     if(ppFactory)
@@ -367,11 +354,14 @@ private:
     RDCLOG("DXGI diagnostics: CreateDXGIFactory hook entered, interface %s", ToStr(riid).c_str());
     if(ppFactory)
       *ppFactory = NULL;
-    HRESULT ret = dxgihooks.CreateDXGIFactory()(riid, ppFactory);
+    PFN_CREATE_DXGI_FACTORY create = dxgihooks.CreateDXGIFactory();
+#if defined(_WIN64)
+    if(s_TrampCreateFactory)
+      create = s_TrampCreateFactory;
+#endif
+    HRESULT ret = create(riid, ppFactory);
 
-    // When the inline hook is active the call above went through the detour which already
-    // wrapped the factory, so only wrap here on the IAT-only path.
-    if(SUCCEEDED(ret) && !InlineActive())
+    if(SUCCEEDED(ret))
       RefCountDXGIObject::HandleWrap("CreateDXGIFactory", riid, ppFactory);
 
     RDCLOG("DXGI diagnostics: CreateDXGIFactory returned %s, factory %p", ToStr(ret).c_str(),
@@ -384,9 +374,14 @@ private:
     RDCLOG("DXGI diagnostics: CreateDXGIFactory1 hook entered, interface %s", ToStr(riid).c_str());
     if(ppFactory)
       *ppFactory = NULL;
-    HRESULT ret = dxgihooks.CreateDXGIFactory1()(riid, ppFactory);
+    PFN_CREATE_DXGI_FACTORY create = dxgihooks.CreateDXGIFactory1();
+#if defined(_WIN64)
+    if(s_TrampCreateFactory1)
+      create = s_TrampCreateFactory1;
+#endif
+    HRESULT ret = create(riid, ppFactory);
 
-    if(SUCCEEDED(ret) && !InlineActive())
+    if(SUCCEEDED(ret))
       RefCountDXGIObject::HandleWrap("CreateDXGIFactory1", riid, ppFactory);
 
     RDCLOG("DXGI diagnostics: CreateDXGIFactory1 returned %s, factory %p", ToStr(ret).c_str(),
@@ -400,9 +395,14 @@ private:
            ToStr(riid).c_str());
     if(ppFactory)
       *ppFactory = NULL;
-    HRESULT ret = dxgihooks.CreateDXGIFactory2()(Flags, riid, ppFactory);
+    PFN_CREATE_DXGI_FACTORY2 create = dxgihooks.CreateDXGIFactory2();
+#if defined(_WIN64)
+    if(s_TrampCreateFactory2)
+      create = s_TrampCreateFactory2;
+#endif
+    HRESULT ret = create(Flags, riid, ppFactory);
 
-    if(SUCCEEDED(ret) && !InlineActive())
+    if(SUCCEEDED(ret))
       RefCountDXGIObject::HandleWrap("CreateDXGIFactory2", riid, ppFactory);
 
     RDCLOG("DXGI diagnostics: CreateDXGIFactory2 returned %s, factory %p", ToStr(ret).c_str(),
